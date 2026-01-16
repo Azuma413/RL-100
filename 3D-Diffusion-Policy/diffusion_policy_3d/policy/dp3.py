@@ -19,11 +19,11 @@ from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 
 class DP3(BasePolicy):
-    def __init__(self, 
+    def __init__(self,
             shape_meta: dict,
             noise_scheduler: DDPMScheduler,
-            horizon, 
-            n_action_steps, 
+            horizon,
+            n_action_steps,
             n_obs_steps,
             num_inference_steps=None,
             obs_as_global_cond=True,
@@ -40,11 +40,23 @@ class DP3(BasePolicy):
             use_pc_color=False,
             pointnet_type="pointnet",
             pointcloud_encoder_cfg=None,
+            # VIB parameters
+            use_recon_vib=False,
+            beta_recon=1.0,
+            beta_kl=0.001,
             # parameters passed to step
             **kwargs):
         super().__init__()
 
         self.condition_type = condition_type
+        self.use_recon_vib = use_recon_vib
+        self.beta_recon = beta_recon
+        self.beta_kl = beta_kl
+
+        # Force prediction_type to 'epsilon' for RL-100
+        if noise_scheduler.config.prediction_type != 'epsilon':
+            cprint(f"[DP3] Forcing prediction_type to 'epsilon' (was '{noise_scheduler.config.prediction_type}')", "yellow")
+            noise_scheduler.config.prediction_type = 'epsilon'
 
         # parse shape_meta
         action_shape = shape_meta['action']['shape']
@@ -66,6 +78,9 @@ class DP3(BasePolicy):
                                                 pointcloud_encoder_cfg=pointcloud_encoder_cfg,
                                                 use_pc_color=use_pc_color,
                                                 pointnet_type=pointnet_type,
+                                                use_recon_vib=use_recon_vib,
+                                                beta_recon=beta_recon,
+                                                beta_kl=beta_kl,
                                                 )
 
         # create diffusion model
@@ -278,9 +293,21 @@ class DP3(BasePolicy):
         
         if self.obs_as_global_cond:
             # reshape B, T, ... to B*T
-            this_nobs = dict_apply(nobs, 
+            this_nobs = dict_apply(nobs,
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+
+            # Extract features with VIB loss if enabled
+            if self.use_recon_vib:
+                nobs_features, reg_loss_dict = self.obs_encoder(this_nobs, return_reg_loss=True)
+            else:
+                nobs_features = self.obs_encoder(this_nobs)
+                reg_loss_dict = {
+                    'kl_loss': 0.0,
+                    'recon_loss': 0.0,
+                    'recon_loss_pc': 0.0,
+                    'recon_loss_state': 0.0,
+                    'total_reg_loss': 0.0
+                }
 
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
@@ -294,7 +321,20 @@ class DP3(BasePolicy):
         else:
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+
+            # Extract features with VIB loss if enabled
+            if self.use_recon_vib:
+                nobs_features, reg_loss_dict = self.obs_encoder(this_nobs, return_reg_loss=True)
+            else:
+                nobs_features = self.obs_encoder(this_nobs)
+                reg_loss_dict = {
+                    'kl_loss': 0.0,
+                    'recon_loss': 0.0,
+                    'recon_loss_pc': 0.0,
+                    'recon_loss_state': 0.0,
+                    'total_reg_loss': 0.0
+                }
+
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
             cond_data = torch.cat([nactions, nobs_features], dim=-1)
@@ -360,17 +400,28 @@ class DP3(BasePolicy):
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
-        
+
+        # Add VIB regularization loss
+        reg_loss = reg_loss_dict.get('total_reg_loss', 0.0)
+        if isinstance(reg_loss, torch.Tensor) and reg_loss.dim() > 0:
+            reg_loss = reg_loss.mean()
+
+        total_loss = loss + reg_loss
 
         loss_dict = {
-                'bc_loss': loss.item(),
-            }
+            'bc_loss': loss.item(),
+            'kl_loss': reg_loss_dict.get('kl_loss', 0.0),
+            'recon_loss': reg_loss_dict.get('recon_loss', 0.0),
+            'recon_loss_pc': reg_loss_dict.get('recon_loss_pc', 0.0),
+            'recon_loss_state': reg_loss_dict.get('recon_loss_state', 0.0),
+            'total_reg_loss': reg_loss.item() if isinstance(reg_loss, torch.Tensor) else reg_loss,
+        }
 
         # print(f"t2-t1: {t2-t1:.3f}")
         # print(f"t3-t2: {t3-t2:.3f}")
         # print(f"t4-t3: {t4-t3:.3f}")
         # print(f"t5-t4: {t5-t4:.3f}")
         # print(f"t6-t5: {t6-t5:.3f}")
-        
-        return loss, loss_dict
+
+        return total_loss, loss_dict
 
