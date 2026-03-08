@@ -25,11 +25,15 @@ from diffusion_policy_3d.model.rl.consistency_model import (
     ConsistencyDistillation
 )
 
+
+from diffusion_policy_3d.model.rl.transition_model import TransitionModel
+
 __all__ = [
     'IQLCritics',
     'VNetwork',
     'QNetwork',
     'MLP',
     'ConsistencyModel',
-    'ConsistencyDistillation'
+    'ConsistencyDistillation',
+    'TransitionModel'
 ]

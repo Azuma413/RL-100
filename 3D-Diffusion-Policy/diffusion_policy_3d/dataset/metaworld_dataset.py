@@ -126,3 +126,52 @@ class MetaworldDataset(BaseDataset):
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
 
+    def merge_episodes(self, episodes: list) -> int:
+        """
+        Merge newly collected episodes into the replay buffer in-place.
+
+        Each episode is a dict with numpy arrays of shape [T, ...]:
+            state, action, point_cloud, reward, done
+
+        The SequenceSampler is rebuilt after merging so that the new data
+        is immediately available for training.
+
+        Args:
+            episodes: list of episode dicts from MetaworldRunner.run_and_collect()
+
+        Returns:
+            n_new_steps: total number of new timesteps added
+        """
+        if not episodes:
+            return 0
+
+        n_new_steps = 0
+        for ep in episodes:
+            # Ensure reward/done exist (add zeros if this is demo data without RL labels)
+            ep_data = {
+                'state':       ep['state'],
+                'action':      ep['action'],
+                'point_cloud': ep['point_cloud'],
+                'reward':      ep.get('reward', np.zeros(len(ep['state']), dtype=np.float32)),
+                'done':        ep.get('done',   np.zeros(len(ep['state']), dtype=np.float32)),
+            }
+            self.replay_buffer.add_episode(ep_data)
+            n_new_steps += len(ep['state'])
+
+        # Flag that RL data is now present
+        self.has_rl_data = True
+
+        # Rebuild sampler to include all episodes (no episode cap after merging)
+        n_total = self.replay_buffer.n_episodes
+        episode_mask = np.ones(n_total, dtype=bool)
+        self.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer,
+            sequence_length=self.horizon,
+            pad_before=self.pad_before,
+            pad_after=self.pad_after,
+            episode_mask=episode_mask,
+        )
+        self.train_mask = episode_mask
+
+        return n_new_steps
+

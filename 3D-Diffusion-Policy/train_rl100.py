@@ -77,7 +77,6 @@ def main(cfg: OmegaConf):
 
     # Get output directory
     output_dir = os.getcwd()  # Hydra changes cwd to output dir
-    cfg.output_dir = output_dir
     cprint(f"[Setup] Output directory: {output_dir}", "green")
 
     # Initialize WandB
@@ -107,13 +106,16 @@ def main(cfg: OmegaConf):
 
     # Initialize RL100Trainer
     cprint("\n[Setup] Initializing RL100Trainer...", "cyan")
-    trainer = RL100Trainer(cfg)
+    trainer = RL100Trainer(cfg, output_dir=output_dir)
     cprint("[Setup] RL100Trainer initialized", "green")
 
     # Optionally load checkpoint
+    skip_il = False
     if cfg.training.resume and cfg.training.resume_path:
         cprint(f"\n[Setup] Resuming from checkpoint: {cfg.training.resume_path}", "yellow")
         trainer.load_checkpoint(cfg.training.resume_path)
+        skip_il = True
+        cprint("[Setup] IL phase will be skipped — starting directly from offline RL.", "yellow")
 
     # Run training pipeline
     cprint("\n[Training] Starting RL-100 pipeline...", "cyan")
@@ -121,7 +123,8 @@ def main(cfg: OmegaConf):
         trainer.run_pipeline(
             initial_dataset=dataset,
             env_runner=env_runner,
-            num_offline_iterations=cfg.training.num_offline_iterations
+            num_offline_iterations=cfg.training.num_offline_iterations,
+            skip_il=skip_il,
         )
     except KeyboardInterrupt:
         cprint("\n[Training] Interrupted by user. Saving checkpoint...", "yellow")
@@ -138,7 +141,10 @@ def main(cfg: OmegaConf):
     eval_policy = trainer.ema_policy if trainer.ema_policy else trainer.policy
     eval_policy.eval()
     with torch.no_grad():
-        final_metrics = env_runner.run(eval_policy, num_episodes=50)
+        try:
+            final_metrics = env_runner.run(eval_policy, num_episodes=50)
+        except TypeError:
+            final_metrics = env_runner.run(eval_policy)
 
     cprint("\n" + "="*80, "green")
     cprint(" "*25 + "FINAL RESULTS", "green")

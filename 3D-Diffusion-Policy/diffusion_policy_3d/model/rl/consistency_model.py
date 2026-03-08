@@ -155,7 +155,7 @@ class ConsistencyDistillation:
     5. Minimize L2 distance: L_CD = ||student - teacher||^2
 
     Args:
-        teacher_policy: DP3 policy (frozen during distillation)
+        teacher_policy: DP3 policy (used as no-grad teacher during distillation)
         student_model: ConsistencyModel
         student_optimizer: Optimizer for student
     """
@@ -170,11 +170,9 @@ class ConsistencyDistillation:
         self.student_model = student_model
         self.student_optimizer = student_optimizer
 
-        # Freeze teacher
-        for param in self.teacher_policy.parameters():
-            param.requires_grad = False
-
-        self.teacher_policy.eval()
+        # Do not freeze teacher params here.
+        # The teacher is the same policy being optimized by IL/PPO in RL100Trainer.
+        # Freezing here would disable training and break backward in IL stage.
 
     def compute_distillation_loss(
         self,
@@ -197,51 +195,59 @@ class ConsistencyDistillation:
         horizon = self.teacher_policy.horizon
         action_dim = self.teacher_policy.action_dim
 
-        # Normalize observations (using teacher's normalizer)
-        nobs = self.teacher_policy.normalizer.normalize(obs_dict)
+        # Use teacher in eval mode for stable targets, then restore mode.
+        teacher_was_training = self.teacher_policy.training
+        self.teacher_policy.eval()
 
-        # Remove color if needed
-        if not self.teacher_policy.use_pc_color:
-            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        try:
+            # Normalize observations (using teacher's normalizer)
+            nobs = self.teacher_policy.normalizer.normalize(obs_dict)
 
-        # Encode observations (shared encoder from teacher)
-        with torch.no_grad():
-            # Reshape for encoder
-            this_nobs = {}
-            for key, value in nobs.items():
-                this_nobs[key] = value[:, :self.teacher_policy.n_obs_steps, ...].reshape(
-                    -1, *value.shape[2:]
+            # Remove color if needed
+            if not self.teacher_policy.use_pc_color:
+                nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+
+            # Encode observations (shared encoder from teacher)
+            with torch.no_grad():
+                # Reshape for encoder
+                this_nobs = {}
+                for key, value in nobs.items():
+                    this_nobs[key] = value[:, :self.teacher_policy.n_obs_steps, ...].reshape(
+                        -1, *value.shape[2:]
+                    )
+
+                # Encode
+                nobs_features = self.teacher_policy.obs_encoder(this_nobs)
+
+                # Reshape to [B, obs_feature_dim * n_obs_steps]
+                global_cond = nobs_features.reshape(batch_size, -1)
+
+            # Generate teacher output (K-step DDIM)
+            with torch.no_grad():
+                # Sample initial noise
+                noisy_action = torch.randn(
+                    batch_size, horizon, action_dim,
+                    device=device
                 )
 
-            # Encode
-            nobs_features = self.teacher_policy.obs_encoder(this_nobs)
+                # Run teacher denoising (K steps)
+                teacher_output = self.teacher_policy.conditional_sample(
+                    condition_data=noisy_action,
+                    condition_mask=torch.zeros_like(noisy_action, dtype=torch.bool),
+                    global_cond=global_cond
+                )
 
-            # Reshape to [B, obs_feature_dim * n_obs_steps]
-            global_cond = nobs_features.reshape(batch_size, -1)
-
-        # Generate teacher output (K-step DDIM)
-        with torch.no_grad():
-            # Sample initial noise
-            noisy_action = torch.randn(
-                batch_size, horizon, action_dim,
-                device=device
-            )
-
-            # Run teacher denoising (K steps)
-            teacher_output = self.teacher_policy.conditional_sample(
-                condition_data=noisy_action,
-                condition_mask=torch.zeros_like(noisy_action, dtype=torch.bool),
+            # Generate student output (1 step)
+            student_output = self.student_model(
+                noisy_action=noisy_action,
                 global_cond=global_cond
             )
 
-        # Generate student output (1 step)
-        student_output = self.student_model(
-            noisy_action=noisy_action,
-            global_cond=global_cond
-        )
-
-        # Compute L2 loss
-        cd_loss = F.mse_loss(student_output, teacher_output)
+            # Compute L2 loss
+            cd_loss = F.mse_loss(student_output, teacher_output)
+        finally:
+            if teacher_was_training:
+                self.teacher_policy.train()
 
         info = {
             'cd_loss': cd_loss.item(),

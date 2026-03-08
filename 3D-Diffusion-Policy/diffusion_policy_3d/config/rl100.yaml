@@ -12,6 +12,16 @@ defaults:
   - task: metaworld_push  # Task configuration (metaworld_push, adroit_hammer, etc.)
   - _self_
 
+name: train_rl100
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "debug"
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+obs_as_global_cond: true
+
 # ============================================
 # Policy Configuration (RL100Policy)
 # ============================================
@@ -19,9 +29,12 @@ policy:
   _target_: diffusion_policy_3d.policy.rl100_policy.RL100Policy
 
   # Architecture (same as DP3)
-  horizon: 16
-  n_obs_steps: 2
-  n_action_steps: 8
+  shape_meta: ${shape_meta}
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  num_inference_steps: 10  # K=10 denoising steps
+  use_point_crop: true
   encoder_output_dim: 64
   diffusion_step_embed_dim: 128
   down_dims: [512, 1024, 2048]
@@ -30,13 +43,12 @@ policy:
   condition_type: film
   use_pc_color: false
   pointnet_type: "pointnet"
-  obs_as_global_cond: true
+  obs_as_global_cond: ${obs_as_global_cond}
 
   # Noise scheduler (DDIM with epsilon prediction)
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
-    num_inference_steps: 10  # K=10 denoising steps
     beta_schedule: squaredcos_cap_v2
     clip_sample: true
     prediction_type: epsilon  # MUST be epsilon for RL-100
@@ -47,6 +59,7 @@ policy:
     out_channels: 64
     use_layernorm: true
     final_norm: layernorm
+    normal_channel: false
 
   # VIB (optional)
   use_recon_vib: false
@@ -122,7 +135,7 @@ dataloader:
 # ============================================
 training:
   # General
-  device: cuda
+  device: cuda:0
   seed: 42
   use_ema: true
 
@@ -135,6 +148,7 @@ training:
   num_offline_iterations: 5          # M iterations of offline RL loop
   critic_epochs: 50                  # Epochs to train IQL critics
   ppo_epochs: 100                    # Epochs to optimize policy with PPO
+  ppo_inner_steps: 4                 # Inner PPO gradient steps per batch (keep ratio != 1)
   collection_episodes: 50            # Episodes to collect per iteration
   cd_every: 5                        # Consistency distillation frequency (steps)
 
@@ -153,8 +167,8 @@ training:
   checkpoint_every: 200              # Save checkpoint every N epochs
 
   # Resume
-  resume: false
-  resume_path: null
+  resume: true
+  resume_path: /nfs_global/S/yangrongzheng/RL100/3D-Diffusion-Policy/3D-Diffusion-Policy/checkpoints/after_il.ckpt
 
 # ============================================
 # Checkpoint Configuration
@@ -173,7 +187,7 @@ checkpoint:
 # Logging Configuration
 # ============================================
 logging:
-  use_wandb: true
+  use_wandb: false
   project: rl100-dp3
   group: ${task.name}
   name: rl100_${task.name}_seed${training.seed}

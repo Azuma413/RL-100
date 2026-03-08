@@ -1,6 +1,6 @@
 name: bin-picking
 
-task_name: ${name}
+task_name: ${.name}
 
 shape_meta: &shape_meta
   obs:

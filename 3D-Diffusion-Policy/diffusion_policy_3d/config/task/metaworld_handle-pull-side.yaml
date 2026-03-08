@@ -1,6 +1,6 @@
 name: handle-pull-side
 
-task_name: ${name}
+task_name: ${.name}
 
 shape_meta: &shape_meta
   obs:

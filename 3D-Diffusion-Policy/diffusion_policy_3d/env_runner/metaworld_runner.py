@@ -132,3 +132,98 @@ class MetaworldRunner(BaseRunner):
         videos = None
 
         return log_data
+
+    def run_and_collect(self, policy: BasePolicy, num_episodes: int):
+        """
+        Roll out policy and collect trajectory data for dataset merging.
+
+        Stores one entry per policy call (action-chunk level), matching the
+        format of the existing MetaWorld zarr dataset:
+            state        : [T, state_dim]    robot proprioception
+            action       : [T, action_dim]   first action of chunk
+            point_cloud  : [T, N, 6]         current point cloud
+            reward       : [T]               cumulative chunk reward
+            done         : [T]               episode termination flag
+
+        Returns:
+            metrics  : same dict as run()
+            episodes : list of per-episode dicts (numpy arrays)
+        """
+        device = policy.device
+        env = self.env
+
+        all_traj_rewards = []
+        all_success_rates = []
+        collected_episodes = []
+
+        for episode_idx in tqdm.tqdm(
+            range(num_episodes),
+            desc=f"Collect in {self.task_name}",
+            leave=False,
+            mininterval=self.tqdm_interval_sec,
+        ):
+            obs = env.reset()
+            policy.reset()
+
+            done = False
+            traj_reward = 0
+            is_success = False
+
+            ep_state, ep_action, ep_pc, ep_reward, ep_done = [], [], [], [], []
+
+            while not done:
+                np_obs_dict = dict(obs)
+
+                # Current observation (latest frame in the n_obs_steps buffer)
+                cur_state = np_obs_dict['agent_pos'][-1]        # [state_dim]
+                cur_pc    = np_obs_dict['point_cloud'][-1]      # [N, 6]
+
+                obs_dict_input = {
+                    'point_cloud': torch.from_numpy(np_obs_dict['point_cloud']).unsqueeze(0).to(device),
+                    'agent_pos':   torch.from_numpy(np_obs_dict['agent_pos']).unsqueeze(0).to(device),
+                }
+
+                with torch.no_grad():
+                    action_dict = policy.predict_action(obs_dict_input)
+
+                np_action = action_dict['action'].squeeze(0).detach().cpu().numpy()  # [n_action_steps, Da]
+                first_action = np_action[0]   # [Da] — store first action, matching dataset format
+
+                obs, reward, done, info = env.step(np_action)
+
+                traj_reward += reward
+                done = bool(np.all(done))
+                is_success = is_success or bool(max(info['success']))
+
+                ep_state.append(cur_state.astype(np.float32))
+                ep_action.append(first_action.astype(np.float32))
+                ep_pc.append(cur_pc.astype(np.float32))
+                ep_reward.append(np.float32(reward))
+                ep_done.append(np.float32(done))
+
+            all_success_rates.append(is_success)
+            all_traj_rewards.append(traj_reward)
+
+            if len(ep_state) > 0:
+                collected_episodes.append({
+                    'state':       np.stack(ep_state,  axis=0),
+                    'action':      np.stack(ep_action, axis=0),
+                    'point_cloud': np.stack(ep_pc,     axis=0),
+                    'reward':      np.array(ep_reward, dtype=np.float32),
+                    'done':        np.array(ep_done,   dtype=np.float32),
+                })
+
+        metrics = {
+            'mean_traj_rewards':  float(np.mean(all_traj_rewards)),
+            'mean_success_rates': float(np.mean(all_success_rates)),
+            'test_mean_score':    float(np.mean(all_success_rates)),
+            'n_episodes':         len(collected_episodes),
+            'n_steps':            sum(len(e['state']) for e in collected_episodes),
+        }
+
+        cprint(f"[Collect] {len(collected_episodes)} episodes, "
+               f"success={metrics['mean_success_rates']:.3f}, "
+               f"steps={metrics['n_steps']}", 'cyan')
+
+        _ = env.reset()
+        return metrics, collected_episodes

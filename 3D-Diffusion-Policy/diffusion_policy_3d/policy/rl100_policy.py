@@ -174,16 +174,16 @@ class RL100Policy(DP3):
         Returns:
             log_prob: [B] log probabilities
         """
-        if variance.dim() == 1:
-            variance = variance.view(-1, 1, 1)
+        # Keep variance as [B] for consistent broadcasting
+        variance = variance.view(-1)  # [B]
 
         # Dimensionality
         d = x.shape[1] * x.shape[2]  # T * D
 
-        # Compute log prob
+        # Compute log prob — all terms are [B]
         log_prob = -0.5 * (
             d * torch.log(2 * torch.pi * variance) +
-            torch.sum((x - mean) ** 2, dim=[1, 2]) / variance.squeeze()
+            torch.sum((x - mean) ** 2, dim=[1, 2]) / variance
         )
 
         return log_prob
@@ -228,7 +228,7 @@ class RL100Policy(DP3):
 
         alpha_t = alphas_cumprod[t_tensor].view(-1, 1, 1)
 
-        if t_tensor[0] > 0:
+        if t_tensor > 0:
             alpha_t_prev = alphas_cumprod[t_tensor - 1].view(-1, 1, 1)
         else:
             alpha_t_prev = torch.ones_like(alpha_t)
@@ -236,17 +236,18 @@ class RL100Policy(DP3):
         # Predicted x_0
         pred_x0 = (x_t - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
 
-        # Mean of p(x_{t-1} | x_t)
-        mean = (
-            torch.sqrt(alpha_t_prev) * pred_x0 +
-            torch.sqrt(1 - alpha_t_prev) * noise_pred
+        # Variance σ² (clipped per paper Eq.23)
+        variance = self.get_variance_at_timestep(t_tensor).to(x_t.device)
+
+        # Mean: paper Eq.5a  μ = √ᾱₘ·x̂₀ + √(1 - ᾱₘ - σ²)·εθ
+        # NOTE: must subtract σ² under the square root, not use √(1-ᾱₘ)
+        noise_coeff = torch.sqrt(
+            torch.clamp(1 - alpha_t_prev - variance.view(-1, 1, 1), min=0.0)
         )
+        mean = torch.sqrt(alpha_t_prev) * pred_x0 + noise_coeff * noise_pred
 
-        # Variance
-        variance = self.get_variance_at_timestep(t_tensor)
-
-        # Sample x_{t-1}
-        if t_tensor[0] > 0:
+        # Sample x_{t-1} = μ + σ·ε
+        if t_tensor > 0:
             noise = torch.randn_like(x_t)
             x_t_prev = mean + torch.sqrt(variance).view(-1, 1, 1) * noise
         else:
@@ -392,13 +393,15 @@ class RL100Policy(DP3):
                 alpha_t_prev = torch.ones_like(alpha_t)
 
             pred_x0 = (x_t - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
-            mean = (
-                torch.sqrt(alpha_t_prev) * pred_x0 +
-                torch.sqrt(1 - alpha_t_prev) * noise_pred
-            )
 
-            # Variance
+            # Variance σ² (clipped, paper Eq.23)
             variance = self.get_variance_at_timestep(t_tensor)
+
+            # Mean: paper Eq.5a  μ = √ᾱₘ·x̂₀ + √(1 - ᾱₘ - σ²)·εθ
+            noise_coeff = torch.sqrt(
+                torch.clamp(1 - alpha_t_prev - variance.view(-1, 1, 1), min=0.0)
+            )
+            mean = torch.sqrt(alpha_t_prev) * pred_x0 + noise_coeff * noise_pred
 
             # Log prob of actual transition
             log_prob = self.compute_gaussian_log_prob(x_t_prev, mean, variance)
@@ -429,8 +432,8 @@ class RL100Policy(DP3):
 
             ppo_losses.append(ppo_loss_k)
 
-        # Sum over K steps
-        total_ppo_loss = sum(ppo_losses)
+        # Average over K steps (not sum) — prevents gradient magnitude scaling with K
+        total_ppo_loss = sum(ppo_losses) / len(ppo_losses)
 
         info = {
             'ppo_loss': total_ppo_loss.item(),
@@ -442,6 +445,46 @@ class RL100Policy(DP3):
         }
 
         return total_ppo_loss, info
+
+    def sample_for_ppo(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Sample denoising trajectory for PPO training.
+
+        Call this ONCE before the inner PPO loop to get fixed old log probs.
+        Then call compute_ppo_loss() multiple times with the same trajectory.
+
+        Returns:
+            trajectory: List of [B, T, D] tensors (K+1 entries)
+            log_probs_old: List of [B] tensors (K entries)
+        """
+        device = next(self.model.parameters()).device
+        batch_size = next(iter(obs_dict.values())).shape[0]
+
+        nobs = self.normalizer.normalize(obs_dict)
+        if not self.use_pc_color:
+            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        this_nobs = dict_apply(
+            nobs,
+            lambda x: x[:, :self.n_obs_steps, ...].reshape(-1, *x.shape[2:])
+        )
+        nobs_features = self.obs_encoder(this_nobs)
+        global_cond = nobs_features.reshape(batch_size, -1)
+
+        cond_data = torch.zeros((batch_size, self.horizon, self.action_dim), device=device)
+        cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+
+        with torch.no_grad():
+            _, trajectory, log_probs_old = self.conditional_sample_with_trajectory(
+                condition_data=cond_data,
+                condition_mask=cond_mask,
+                global_cond=global_cond,
+                return_trajectory=True
+            )
+
+        return trajectory, log_probs_old
 
     def compute_rl_loss(
         self,
