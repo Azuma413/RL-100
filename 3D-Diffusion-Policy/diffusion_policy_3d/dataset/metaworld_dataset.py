@@ -19,6 +19,8 @@ class MetaworldDataset(BaseDataset):
             seed=42,
             val_ratio=0.0,
             max_train_episodes=None,
+            n_action_steps=8,
+            gamma=0.99,
             ):
         super().__init__()
 
@@ -52,6 +54,8 @@ class MetaworldDataset(BaseDataset):
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.n_action_steps = n_action_steps
+        self.gamma = gamma
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -96,14 +100,21 @@ class MetaworldDataset(BaseDataset):
         data = self._sample_to_data(sample)
 
         if self.has_rl_data:
-            # Reward and done at the first timestep of the sampled window
-            data['reward'] = np.array(sample['reward'][0], dtype=np.float32)
-            data['done'] = np.array(sample['done'][0], dtype=np.float32)
+            nc = self.n_action_steps
+            # Paper: R_chunk = Σ_{j=0}^{n_c-1} γ^j · R_{t+j}
+            # Accumulate discounted reward over the action-chunk window.
+            raw_rewards = sample['reward'][:nc].astype(np.float32)  # (nc,)
+            discount = np.array([self.gamma ** j for j in range(nc)], dtype=np.float32)
+            chunk_reward = float(np.dot(discount, raw_rewards))
+            data['reward'] = np.array(chunk_reward, dtype=np.float32)
 
-            # next_obs: load the obs window starting 1 step ahead of the current window
+            # done = True if any step within the chunk is terminal
+            data['done'] = np.array(sample['done'][:nc].any(), dtype=np.float32)
+
+            # next_obs: the obs window starting n_action_steps ahead (chunk-level MDP)
             buffer_start_idx, _, _, _ = self.sampler.indices[idx]
             total_len = len(self.replay_buffer['state'])
-            next_idx = min(buffer_start_idx + 1, total_len - 1)
+            next_idx = min(buffer_start_idx + nc, total_len - 1)
             next_end_idx = min(next_idx + self.horizon, total_len)
 
             next_state = self.replay_buffer['state'][next_idx:next_end_idx].astype(np.float32)
@@ -155,6 +166,7 @@ class MetaworldDataset(BaseDataset):
                 'reward':      ep.get('reward', np.zeros(len(ep['state']), dtype=np.float32)),
                 'done':        ep.get('done',   np.zeros(len(ep['state']), dtype=np.float32)),
             }
+
             self.replay_buffer.add_episode(ep_data)
             n_new_steps += len(ep['state'])
 
@@ -174,4 +186,3 @@ class MetaworldDataset(BaseDataset):
         self.train_mask = episode_mask
 
         return n_new_steps
-

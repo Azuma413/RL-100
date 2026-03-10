@@ -25,7 +25,7 @@ env_runner:
   task_name: ${task_name}
   device: ${training.device}
   use_point_crop: ${policy.use_point_crop}
-  use_pc_color: ${policy.use_pc_color}
+  num_points: 1024
 
 dataset:
   _target_: diffusion_policy_3d.dataset.metaworld_dataset.MetaworldDataset
@@ -36,3 +36,5 @@ dataset:
   seed: 42
   val_ratio: 0.02
   max_train_episodes: 90
+  n_action_steps: ${n_action_steps}   # for chunk reward: R_chunk = Σ γ^j r_{t+j}
+  gamma: 0.99                          # per-step gamma; critics use gamma^n_c

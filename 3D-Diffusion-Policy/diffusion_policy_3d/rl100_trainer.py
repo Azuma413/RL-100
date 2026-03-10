@@ -335,6 +335,12 @@ class RL100Trainer:
         cprint(f"\n[RL100Trainer] Phase 2a: Training IQL Critics (Iteration {self.offline_rl_iteration})", "cyan")
 
         config = self.config
+
+        # Freeze Diffusion Actor during critic-only training (tag2: "冻结 Diffusion Actor，只练 QV 网络")
+        self.policy.eval()
+        for param in self.policy.parameters():
+            param.requires_grad_(False)
+
         self.critics.train()
 
         # Create dataloader
@@ -430,6 +436,11 @@ class RL100Trainer:
             cprint(f"[IQL] Epoch {epoch}/{num_epochs}, "
                    f"V Loss: {float(v_loss_avg):.4f}, "
                    f"Q Loss: {float(q_loss_avg):.4f}", "green")
+
+        # Unfreeze policy after critic training
+        for param in self.policy.parameters():
+            param.requires_grad_(True)
+        self.policy.train()
 
         return {'v_loss': np.mean(v_losses), 'q_loss': np.mean(q_losses) if q_losses else 0}
 
@@ -586,6 +597,14 @@ class RL100Trainer:
         # ── Step 1: Save snapshot for potential rollback ──────────────────────────
         policy_snapshot = copy.deepcopy(self.policy.state_dict())
         ema_snapshot = copy.deepcopy(self.ema_policy.state_dict()) if self.ema_policy is not None else None
+
+        # ── Step 1b: Reduce policy LR for RL fine-tuning (tag3: 10× smaller than IL) ─
+        rl_lr = getattr(config.training, 'rl_policy_lr', 1e-5)
+        current_lr = self.policy_optimizer.param_groups[0]['lr']
+        if abs(current_lr - rl_lr) > 1e-10:
+            cprint(f"[RL PPO] Reducing policy LR: {current_lr:.2e} → {rl_lr:.2e}", "cyan")
+            for pg in self.policy_optimizer.param_groups:
+                pg['lr'] = rl_lr
 
         # ── Step 2: Freeze encoder (paper: ϕIL is fixed during offline RL) ───────
         for param in self.policy.obs_encoder.parameters():
@@ -813,6 +832,24 @@ class RL100Trainer:
         # ============================================
         current_dataset = initial_dataset
 
+        # Store original VIB betas from config for dynamic reduction/restoration.
+        # Paper Eq.17: during RL fine-tuning reduce by 10×; during IL retraining restore.
+        _vib_beta_recon_orig = float(config.policy.get('beta_recon', 1.0))
+        _vib_beta_kl_orig    = float(config.policy.get('beta_kl', 0.001))
+
+        def _apply_vib_betas(factor: float):
+            """Set VIB betas = original * factor on policy (and ema_policy)."""
+            if not getattr(self.policy, 'use_recon_vib', False):
+                return
+            self.policy.obs_encoder.beta_recon = _vib_beta_recon_orig * factor
+            self.policy.obs_encoder.beta_kl    = _vib_beta_kl_orig    * factor
+            if self.ema_policy is not None:
+                self.ema_policy.obs_encoder.beta_recon = _vib_beta_recon_orig * factor
+                self.ema_policy.obs_encoder.beta_kl    = _vib_beta_kl_orig    * factor
+            cprint(f"[RL100] VIB betas set to factor={factor}: "
+                   f"beta_recon={self.policy.obs_encoder.beta_recon:.4f}, "
+                   f"beta_kl={self.policy.obs_encoder.beta_kl:.5f}", "yellow")
+
         # Ensure rewards exist in the dataset before training critics.
         # Expert demo zarrs typically have no reward/done labels;
         # relabel them with sparse success rewards so Q-training works.
@@ -847,6 +884,8 @@ class RL100Trainer:
             )
 
             # 2c) Optimize Policy  (Algorithm 1, Lines 7-8)
+            # Paper Eq.17: reduce VIB betas by 10× during RL fine-tuning.
+            _apply_vib_betas(0.1)
             self.offline_rl_optimize(
                 dataset=current_dataset,
                 num_epochs=config.training.ppo_epochs
@@ -865,8 +904,11 @@ class RL100Trainer:
                        f"({n_new} steps) → total {current_dataset.replay_buffer.n_steps} steps, "
                        f"{current_dataset.replay_buffer.n_episodes} episodes", "cyan")
 
-            # 2e) Retrain IL (optional)
+            # 2e) Retrain IL (optional) — Algorithm 1 Line 13
             if config.training.retrain_il_after_collection:
+                # Paper Eq.17: restore VIB betas to original values for IL re-training.
+                # The 10× reduction only applies to RL fine-tuning (OfflineRL step).
+                _apply_vib_betas(1.0)
                 cprint(f"\n[RL100Trainer] Retraining IL on merged dataset...", "cyan")
                 self.train_imitation_learning(
                     dataset=current_dataset,
@@ -937,7 +979,18 @@ class RL100Trainer:
         """Load checkpoint."""
         checkpoint = torch.load(path, map_location=self.device)
 
-        self.policy.load_state_dict(checkpoint['policy'])
+        # Use strict=False to tolerate architecture mismatches (e.g., checkpoint saved
+        # without VIB but current config has use_recon_vib=True). Missing keys (new VIB
+        # layers) stay randomly initialized and will be trained from scratch; unexpected
+        # keys (VIB layers in checkpoint but not in model) are silently ignored.
+        missing, unexpected = self.policy.load_state_dict(checkpoint['policy'], strict=False)
+        if missing:
+            cprint(f"[Checkpoint] policy: {len(missing)} missing key(s) "
+                   f"(new layers, will train from scratch): {missing[:3]}{'...' if len(missing)>3 else ''}", "yellow")
+        if unexpected:
+            cprint(f"[Checkpoint] policy: {len(unexpected)} unexpected key(s) "
+                   f"(ignored): {unexpected[:3]}{'...' if len(unexpected)>3 else ''}", "yellow")
+
         self.critics.load_state_dict(checkpoint['critics'])
         self.consistency_model.load_state_dict(checkpoint['consistency_model'])
         if 'transition_model' in checkpoint:
@@ -948,7 +1001,7 @@ class RL100Trainer:
         self.consistency_optimizer.load_state_dict(checkpoint['consistency_optimizer'])
 
         if 'ema_policy' in checkpoint and self.ema_policy is not None:
-            self.ema_policy.load_state_dict(checkpoint['ema_policy'])
+            self.ema_policy.load_state_dict(checkpoint['ema_policy'], strict=False)
 
         self.global_step = checkpoint['global_step']
         self.epoch = checkpoint['epoch']

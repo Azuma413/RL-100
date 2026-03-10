@@ -144,17 +144,21 @@ class PointNetEncoderXYZRGB(nn.Module):
             feat = z
 
             if return_recon:
-                # Reconstruct point cloud
+                # Training path: return stochastic z so gradients flow through
+                # the reparameterization trick back to mu_layer and logvar_layer.
                 recon = self.recon_decoder(z)  # (B, 512*C)
                 recon_pc = recon.reshape(-1, 512, self.in_channels)  # (B, 512, C)
                 return feat, mu, logvar, recon_pc
             else:
-                return feat
+                # Inference path: return deterministic mu.
+                # KL loss keeps sigma small, so mu ≈ z; using mu avoids
+                # observation-independent stochastic noise at deployment.
+                return mu
         else:
             # Original forward without VIB
             x = self.final_projection(x)
             return x
-    
+
 
 class PointNetEncoderXYZ(nn.Module):
     """Encoder for Pointcloud
@@ -265,12 +269,13 @@ class PointNetEncoderXYZ(nn.Module):
             feat = z
 
             if return_recon:
-                # Reconstruct point cloud
+                # Training path: return stochastic z and reconstruction for VIB loss.
                 recon = self.recon_decoder(z)  # (B, 512*3)
                 recon_pc = recon.reshape(-1, 512, 3)  # (B, 512, 3)
                 return feat, mu, logvar, recon_pc
             else:
-                return feat
+                # Inference path: return deterministic mu.
+                return mu
         else:
             # Original forward without VIB
             x = self.final_projection(x)
@@ -452,11 +457,12 @@ class DP3Encoder(nn.Module):
             recon_state = self.state_recon_decoder(state_feat)
             recon_loss_state = F.mse_loss(recon_state, state)
 
-            # Total reconstruction loss
+            # Total reconstruction loss (kept for logging; paper Eq.15 splits weighting below)
             recon_loss = recon_loss_pc + recon_loss_state
 
-            # Weighted total regularization loss
-            total_reg_loss = self.beta_recon * recon_loss + self.beta_kl * kl_loss
+            # Paper Eq.15: Lrecon = βrecon * (dChamfer(ô, o) + ||q̂ - q||²_2)
+            # βrecon multiplies BOTH the point-cloud Chamfer term AND the state MSE term.
+            total_reg_loss = self.beta_recon * (recon_loss_pc + recon_loss_state) + self.beta_kl * kl_loss
 
             reg_loss_dict = {
                 'kl_loss': kl_loss.item() if isinstance(kl_loss, torch.Tensor) else kl_loss,
