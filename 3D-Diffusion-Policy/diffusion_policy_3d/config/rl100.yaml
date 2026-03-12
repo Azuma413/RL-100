@@ -67,8 +67,8 @@ policy:
   # reconstruction loss that destroys the pre-trained policy during IL retraining.
   # To use VIB: set true AND retrain from demos (do not load after_il.ckpt trained without VIB).
   use_recon_vib: false
-  beta_recon: 0.001
-  beta_kl: 0.001
+  beta_recon: 0.0001
+  beta_kl: 0.0001
 
   # RL-100 specific parameters
   ppo_clip_eps: 0.2        # PPO clipping threshold ε
@@ -85,6 +85,8 @@ critics:
                                  # Paper: "equivalent discount factor between chunks is γ^n_c"
   tau: 0.7                       # Expectile parameter τ for V network
   target_update_tau: 0.005       # Soft update coefficient for target V
+  reward_scale: 1.0             # Divide chunk reward by this before Q training.
+  reward_type: sparse            # "sparse": reward=1 at last step only; "dense": use env shaped reward
 
 # ============================================
 # Optimizers
@@ -151,17 +153,21 @@ training:
 
   # Phase 2: Offline RL
   num_offline_iterations: 5          # M iterations of offline RL loop
-  critic_epochs: 150                 # Epochs to train IQL critics (50 was insufficient; Q loss still 4.26 at ep49)
+  critic_epochs: 50                  # With reward_scale=10 Q_loss converges by epoch 30-35;
+                                     # training beyond that causes bootstrapping drift (Q 40x overestimated)
   ppo_epochs: 100                    # Epochs to optimize policy with PPO
   ppo_inner_steps: 4                 # Inner PPO gradient steps per batch (keep ratio != 1)
   collection_episodes: 50            # Episodes to collect per iteration
   cd_every: 5                        # Consistency distillation frequency (steps)
+  lambda_cd: 1.0                     # Paper Eq.22: L_total = L_RL + λ_CD·L_CD
   rl_policy_lr: 1.0e-5              # Policy LR during RL phase (10x smaller than IL per tag3)
 
   # Phase 3: Online RL
   run_online_rl: false               # Whether to run online RL fine-tuning
   online_rl_iterations: 10           # Number of online RL iterations
   online_collection_episodes: 20     # Episodes per online iteration
+  lambda_v: 0.5                      # Value loss weight (paper Eq.21)
+  gae_lambda: 0.95                   # GAE λ parameter
 
   # Optimization
   gradient_accumulate_every: 1
@@ -173,7 +179,7 @@ training:
   checkpoint_every: 200              # Save checkpoint every N epochs
 
   # Resume
-  resume: false
+  resume: true
   resume_path: /nfs_global/S/yangrongzheng/RL100/3D-Diffusion-Policy/3D-Diffusion-Policy/checkpoints/after_il.ckpt
 
 # ============================================

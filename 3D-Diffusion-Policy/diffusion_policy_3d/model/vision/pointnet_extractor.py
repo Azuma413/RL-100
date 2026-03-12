@@ -7,6 +7,45 @@ import copy
 from typing import Optional, Dict, Tuple, Union, List, Type
 from termcolor import cprint
 
+try:
+    from pytorch3d.loss import chamfer_distance as pytorch3d_chamfer_distance
+except ImportError:
+    pytorch3d_chamfer_distance = None
+
+
+def chamfer_distance_fallback(
+        source: torch.Tensor,
+        target: torch.Tensor,
+        chunk_size: int = 32
+) -> torch.Tensor:
+    """
+    Differentiable Chamfer distance fallback using torch.cdist.
+
+    This is used when pytorch3d.loss.chamfer_distance is unavailable
+    (e.g. pytorch3d_simplified build with ops only).
+    """
+    assert source.dim() == 3 and target.dim() == 3, \
+        f"Expected [B, N, C] tensors, got {source.shape} and {target.shape}"
+    assert source.shape[0] == target.shape[0], \
+        f"Batch size mismatch: {source.shape[0]} vs {target.shape[0]}"
+
+    batch_size = source.shape[0]
+    loss_sum = source.new_zeros(())
+
+    # Chunk over batch dimension to avoid OOM on large B with [N x M] pairwise distances.
+    for start in range(0, batch_size, chunk_size):
+        end = min(start + chunk_size, batch_size)
+        source_chunk = source[start:end]  # [b, N, C]
+        target_chunk = target[start:end]  # [b, M, C]
+
+        # torch.cdist returns L2 distance. Square it to match Chamfer's squared-L2 form.
+        dist_sq = torch.cdist(source_chunk, target_chunk, p=2).pow(2)  # [b, N, M]
+        src_to_tgt = dist_sq.min(dim=2)[0].mean(dim=1)  # [b]
+        tgt_to_src = dist_sq.min(dim=1)[0].mean(dim=1)  # [b]
+        loss_sum = loss_sum + (src_to_tgt + tgt_to_src).sum()
+
+    return loss_sum / float(batch_size)
+
 
 def create_mlp(
         input_dim: int,
@@ -107,11 +146,18 @@ class PointNetEncoderXYZRGB(nn.Module):
             # VAE branches for mu and logvar
             self.mu_layer = nn.Linear(block_channel[-1], out_channels)
             self.logvar_layer = nn.Linear(block_channel[-1], out_channels)
-            # Reconstruction decoder for point cloud
+            # Match the normalization of final_projection
+            if final_norm == 'layernorm':
+                self.vib_norm = nn.LayerNorm(out_channels)
+            else:
+                self.vib_norm = nn.Identity()
+            # Reconstruction decoder for point cloud — increased capacity
             self.recon_decoder = nn.Sequential(
                 nn.Linear(out_channels, 256),
                 nn.ReLU(),
-                nn.Linear(256, 512 * in_channels)  # Reconstruct 512 points with in_channels features
+                nn.Linear(256, 512),
+                nn.ReLU(),
+                nn.Linear(512, 512 * in_channels)  # Reconstruct 512 points with in_channels features
             )
             self.in_channels = in_channels
             cprint("[PointNetEncoderXYZRGB] VIB enabled with reconstruction decoder", "cyan")
@@ -140,20 +186,15 @@ class PointNetEncoderXYZRGB(nn.Module):
             eps = torch.randn_like(std)
             z = mu + eps * std  # (B, out_channels)
 
-            # z is already the final feature representation, no need for final_projection
-            feat = z
-
             if return_recon:
-                # Training path: return stochastic z so gradients flow through
-                # the reparameterization trick back to mu_layer and logvar_layer.
+                # Training path: normalize z, reconstruct from z for VIB loss.
+                feat = self.vib_norm(z)
                 recon = self.recon_decoder(z)  # (B, 512*C)
                 recon_pc = recon.reshape(-1, 512, self.in_channels)  # (B, 512, C)
                 return feat, mu, logvar, recon_pc
             else:
-                # Inference path: return deterministic mu.
-                # KL loss keeps sigma small, so mu ≈ z; using mu avoids
-                # observation-independent stochastic noise at deployment.
-                return mu
+                # Inference path: return deterministic, normalized mu.
+                return self.vib_norm(mu)
         else:
             # Original forward without VIB
             x = self.final_projection(x)
@@ -223,11 +264,20 @@ class PointNetEncoderXYZ(nn.Module):
             # VAE branches for mu and logvar
             self.mu_layer = nn.Linear(block_channel[-1], out_channels)
             self.logvar_layer = nn.Linear(block_channel[-1], out_channels)
-            # Reconstruction decoder for point cloud
+            # Match the normalization of final_projection so downstream UNet
+            # receives features in the same scale regardless of VIB on/off.
+            if final_norm == 'layernorm':
+                self.vib_norm = nn.LayerNorm(out_channels)
+            else:
+                self.vib_norm = nn.Identity()
+            # Reconstruction decoder for point cloud — increased capacity
+            # to reduce noisy gradients from an always-high Chamfer loss.
             self.recon_decoder = nn.Sequential(
                 nn.Linear(out_channels, 256),
                 nn.ReLU(),
-                nn.Linear(256, 512 * 3)  # Reconstruct 512 points with 3D coordinates
+                nn.Linear(256, 512),
+                nn.ReLU(),
+                nn.Linear(512, 512 * 3)  # Reconstruct 512 points with 3D coordinates
             )
             cprint("[PointNetEncoderXYZ] VIB enabled with reconstruction decoder", "cyan")
             
@@ -265,22 +315,20 @@ class PointNetEncoderXYZ(nn.Module):
             eps = torch.randn_like(std)
             z = mu + eps * std  # (B, out_channels)
 
-            # z is already the final feature representation, no need for final_projection
-            feat = z
-
             if return_recon:
-                # Training path: return stochastic z and reconstruction for VIB loss.
+                # Training path: normalize z, reconstruct from z for VIB loss.
+                feat = self.vib_norm(z)
                 recon = self.recon_decoder(z)  # (B, 512*3)
                 recon_pc = recon.reshape(-1, 512, 3)  # (B, 512, 3)
                 return feat, mu, logvar, recon_pc
             else:
-                # Inference path: return deterministic mu.
-                return mu
+                # Inference path: return deterministic, normalized mu.
+                return self.vib_norm(mu)
         else:
             # Original forward without VIB
             x = self.final_projection(x)
             return x
-    
+
     def save_gradient(self, module, grad_input, grad_output):
         """
         for grad-cam
@@ -345,6 +393,8 @@ class DP3Encoder(nn.Module):
         self.use_recon_vib = use_recon_vib
         self.beta_recon = beta_recon
         self.beta_kl = beta_kl
+        self.chamfer_fallback_chunk_size = 32
+        self._chamfer_backend_logged = False
 
         cprint(f"[DP3Encoder] use_recon_vib: {use_recon_vib}", "cyan")
         cprint(f"[DP3Encoder] beta_recon: {beta_recon}, beta_kl: {beta_kl}", "cyan")
@@ -420,29 +470,30 @@ class DP3Encoder(nn.Module):
             # Use original_points (before imagined robot concatenation) for reconstruction target
             original_points_xyz = original_points[..., :3]  # Extract XYZ coordinates
 
-            # Sample points from original_points_xyz to match recon_pc's size (512 points)
-            # recon_pc shape: (B, 512, 3)
-            B, N_recon, _ = recon_pc.shape
-            _, N_orig, _ = original_points_xyz.shape
+            recon_loss_pc = None
+            if pytorch3d_chamfer_distance is not None:
+                try:
+                    # Supports different point counts between source and target.
+                    recon_loss_pc, _ = pytorch3d_chamfer_distance(original_points_xyz, recon_pc)
+                    if not self._chamfer_backend_logged:
+                        cprint("[DP3Encoder] VIB recon uses pytorch3d.loss.chamfer_distance", "cyan")
+                        self._chamfer_backend_logged = True
+                except Exception as e:
+                    if not self._chamfer_backend_logged:
+                        cprint(f"[DP3Encoder] pytorch3d Chamfer failed ({type(e).__name__}); using torch.cdist fallback", "yellow")
+                        self._chamfer_backend_logged = True
 
-            if N_orig > N_recon:
-                # Randomly sample N_recon points from original point cloud
-                indices = torch.randperm(N_orig, device=original_points_xyz.device)[:N_recon]
-                original_points_xyz_sampled = original_points_xyz[:, indices, :]
-            elif N_orig < N_recon:
-                # If original has fewer points, repeat points to match recon size
-                repeat_factor = (N_recon + N_orig - 1) // N_orig
-                original_points_xyz_sampled = original_points_xyz.repeat(1, repeat_factor, 1)[:, :N_recon, :]
-            else:
-                original_points_xyz_sampled = original_points_xyz
-
-            try:
-                from pytorch3d.loss import chamfer_distance
-                # chamfer_distance expects (B, N, 3) for both inputs
-                recon_loss_pc, _ = chamfer_distance(original_points_xyz_sampled, recon_pc)
-            except ImportError:
-                # Fallback to MSE on XYZ coordinates
-                recon_loss_pc = F.mse_loss(recon_pc, original_points_xyz_sampled)
+            if recon_loss_pc is None:
+                # NOTE: point-set reconstruction must be permutation-invariant.
+                # Using pointwise MSE on unordered clouds is incorrect and causes unstable IL.
+                recon_loss_pc = chamfer_distance_fallback(
+                    original_points_xyz,
+                    recon_pc,
+                    chunk_size=self.chamfer_fallback_chunk_size
+                )
+                if not self._chamfer_backend_logged:
+                    cprint("[DP3Encoder] pytorch3d.loss unavailable, using torch.cdist Chamfer fallback", "yellow")
+                    self._chamfer_backend_logged = True
 
         else:
             pn_feat = self.extractor(points)

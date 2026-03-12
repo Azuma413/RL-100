@@ -96,12 +96,28 @@ def main(cfg: OmegaConf):
     dataset: BaseDataset = hydra.utils.instantiate(cfg.task.dataset)
     cprint(f"[Setup] Dataset loaded: {len(dataset)} episodes", "green")
 
+    dataset_num_points = None
+    if hasattr(dataset, 'replay_buffer'):
+        try:
+            dataset_num_points = int(dataset.replay_buffer['point_cloud'].shape[1])
+            cprint(f"[Setup] Dataset point_cloud points: {dataset_num_points}", "green")
+        except Exception:
+            dataset_num_points = None
+
     # Initialize environment runner
     cprint("[Setup] Initializing environment runner...", "cyan")
-    env_runner: BaseRunner = hydra.utils.instantiate(
-        cfg.task.env_runner,
-        output_dir=output_dir
-    )
+    env_runner_kwargs = {'output_dir': output_dir}
+    if dataset_num_points is not None:
+        configured_points = int(cfg.task.env_runner.get('num_points', dataset_num_points))
+        if configured_points != dataset_num_points:
+            cprint(
+                f"[Setup] env_runner.num_points={configured_points} differs from dataset={dataset_num_points}. "
+                f"Override to dataset value to avoid merge shape mismatch.",
+                "yellow"
+            )
+        env_runner_kwargs['num_points'] = dataset_num_points
+
+    env_runner: BaseRunner = hydra.utils.instantiate(cfg.task.env_runner, **env_runner_kwargs)
     cprint("[Setup] Environment runner initialized", "green")
 
     # Initialize RL100Trainer

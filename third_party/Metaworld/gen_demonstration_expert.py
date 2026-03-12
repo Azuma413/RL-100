@@ -133,7 +133,12 @@ def main(args):
 			full_state_arrays.extend(copy.deepcopy(full_state_arrays_sub))
 			done_sub = np.zeros(total_count_sub, dtype=np.float32)
 			done_sub[-1] = 1.0
-			reward_arrays.extend(copy.deepcopy(reward_arrays_sub))
+			if args.reward_type == 'sparse':
+				reward_sub = np.zeros(total_count_sub, dtype=np.float32)
+				reward_sub[-1] = 1.0
+				reward_arrays.extend(reward_sub.tolist())
+			else:
+				reward_arrays.extend(copy.deepcopy(reward_arrays_sub))
 			done_arrays.extend(done_sub.tolist())
 			cprint('Episode: {}, Reward: {}, Success Times: {}'.format(episode_idx, ep_reward, ep_success_times), 'green')
 			episode_idx += 1
@@ -203,6 +208,8 @@ if __name__ == "__main__":
 	parser.add_argument('--env_name', type=str, default='basketball')
 	parser.add_argument('--num_episodes', type=int, default=10)
 	parser.add_argument('--root_dir', type=str, default="../../3D-Diffusion-Policy/data/" )
+	parser.add_argument('--reward_type', type=str, default='sparse', choices=['sparse', 'dense'],
+	                    help='sparse: reward=1 at last step only; dense: use env shaped reward')
 
 	args = parser.parse_args()
 	main(args)

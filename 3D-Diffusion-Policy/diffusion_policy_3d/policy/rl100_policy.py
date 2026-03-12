@@ -120,36 +120,48 @@ class RL100Policy(DP3):
         self.sigma_max = sigma_max
         self.use_variance_clip = use_variance_clip
 
-    def get_variance_at_timestep(self, timestep: torch.Tensor) -> torch.Tensor:
+    def get_variance_at_timestep(
+        self,
+        timestep: torch.Tensor,
+        prev_timestep: torch.Tensor
+    ) -> torch.Tensor:
         """
-        Compute variance σ_k^2 for timestep k.
+        Compute variance σ_k^2 for DDIM step t → t_prev.
 
-        Uses DDIM variance schedule with optional clipping.
+        Uses the ACTUAL previous timestep from the scheduler's schedule,
+        NOT t-1.  With num_train_timesteps=100 and num_inference_steps=10
+        the schedule is [90,80,...,0], so for t=90 prev=80, not 89.
+
+        Paper Eq.23: σ̃_k = clip(σ_k, σ_min, σ_max)
 
         Args:
-            timestep: [B] or scalar timestep
+            timestep: [B] current timestep in the DDIM schedule
+            prev_timestep: [B] previous timestep in the DDIM schedule
+                           (use -1 or 0 convention for the final step)
 
         Returns:
-            variance: [B] variance values
+            variance: [B] variance values (σ²)
         """
-        # Get alpha values from scheduler
         alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(timestep.device)
 
         if timestep.dim() == 0:
             timestep = timestep.unsqueeze(0)
+        if prev_timestep.dim() == 0:
+            prev_timestep = prev_timestep.unsqueeze(0)
 
         alpha_t = alphas_cumprod[timestep]
 
-        # For DDIM, variance at step t->t-1
-        if timestep[0] > 0:
-            alpha_t_prev = alphas_cumprod[timestep - 1]
-        else:
-            alpha_t_prev = torch.ones_like(alpha_t)
+        # For the final step (prev_timestep <= 0), alpha_t_prev = 1.0
+        alpha_t_prev = torch.where(
+            prev_timestep >= 0,
+            alphas_cumprod[prev_timestep.clamp(min=0)],
+            torch.ones_like(alpha_t)
+        )
 
-        # DDIM variance: σ_t^2 = (1 - α_{t-1}) / (1 - α_t) * (1 - α_t / α_{t-1})
+        # DDIM variance: σ² = (1 - ᾱ_{t_prev}) / (1 - ᾱ_t) * (1 - ᾱ_t / ᾱ_{t_prev})
         variance = (1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev)
 
-        # Clip variance to avoid numerical issues and control exploration
+        # Paper Eq.23: clip variance to control exploration
         if self.use_variance_clip:
             variance = torch.clamp(variance, self.sigma_min ** 2, self.sigma_max ** 2)
 
@@ -192,20 +204,26 @@ class RL100Policy(DP3):
         self,
         x_t: torch.Tensor,
         t: torch.Tensor,
+        t_prev: torch.Tensor,
         global_cond: torch.Tensor,
         return_mean: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Perform one denoising step and compute log probability.
+        Perform one DDIM denoising step t → t_prev and compute log probability.
+
+        IMPORTANT: t_prev must be the ACTUAL previous timestep from the DDIM
+        schedule, NOT t-1.  E.g. for schedule [90,80,...,0], when t=90,
+        t_prev=80.
 
         Args:
             x_t: [B, T, D] noisy action at timestep t
-            t: timestep (scalar or [B])
+            t: timestep (scalar or [B]) — current
+            t_prev: timestep (scalar or [B]) — previous in DDIM schedule
             global_cond: [B, cond_dim] observation features
             return_mean: if True, also return predicted mean
 
         Returns:
-            x_t_prev: [B, T, D] denoised action at timestep t-1
+            x_t_prev: [B, T, D] denoised action at timestep t_prev
             log_prob: [B] log probability of transition
             mean: [B, T, D] predicted mean (if return_mean=True)
         """
@@ -216,42 +234,46 @@ class RL100Policy(DP3):
             global_cond=global_cond
         )
 
-        # Compute mean using DDIM update rule
-        # x_{t-1} = √(α_{t-1}) * (x_t - √(1-α_t) * ε_θ) / √(α_t) + √(1-α_{t-1}) * ε_θ
-
         alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(x_t.device)
 
         if isinstance(t, int):
             t_tensor = torch.tensor([t], device=x_t.device).expand(x_t.shape[0])
         else:
             t_tensor = t
+        if isinstance(t_prev, int):
+            t_prev_tensor = torch.tensor([t_prev], device=x_t.device).expand(x_t.shape[0])
+        else:
+            t_prev_tensor = t_prev
 
         alpha_t = alphas_cumprod[t_tensor].view(-1, 1, 1)
 
-        if t_tensor > 0:
-            alpha_t_prev = alphas_cumprod[t_tensor - 1].view(-1, 1, 1)
-        else:
-            alpha_t_prev = torch.ones_like(alpha_t)
+        # Use ACTUAL previous timestep from schedule (not t-1)
+        alpha_t_prev = torch.where(
+            (t_prev_tensor >= 0).view(-1, 1, 1),
+            alphas_cumprod[t_prev_tensor.clamp(min=0)].view(-1, 1, 1),
+            torch.ones_like(alpha_t)
+        )
 
         # Predicted x_0
         pred_x0 = (x_t - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
 
         # Variance σ² (clipped per paper Eq.23)
-        variance = self.get_variance_at_timestep(t_tensor).to(x_t.device)
+        variance = self.get_variance_at_timestep(t_tensor, t_prev_tensor).to(x_t.device)
 
-        # Mean: paper Eq.5a  μ = √ᾱₘ·x̂₀ + √(1 - ᾱₘ - σ²)·εθ
-        # NOTE: must subtract σ² under the square root, not use √(1-ᾱₘ)
+        # Mean: paper Eq.5a  μ = √ᾱ_{t_prev}·x̂₀ + √(1 - ᾱ_{t_prev} - σ²)·εθ
         noise_coeff = torch.sqrt(
             torch.clamp(1 - alpha_t_prev - variance.view(-1, 1, 1), min=0.0)
         )
         mean = torch.sqrt(alpha_t_prev) * pred_x0 + noise_coeff * noise_pred
 
-        # Sample x_{t-1} = μ + σ·ε
-        if t_tensor > 0:
-            noise = torch.randn_like(x_t)
-            x_t_prev = mean + torch.sqrt(variance).view(-1, 1, 1) * noise
-        else:
-            x_t_prev = mean
+        # Sample x_{t_prev} = μ + σ·ε  (no noise at final step)
+        is_final_step = (t_prev_tensor < 0).view(-1, 1, 1)
+        noise = torch.randn_like(x_t)
+        x_t_prev = torch.where(
+            is_final_step,
+            mean,
+            mean + torch.sqrt(variance).view(-1, 1, 1) * noise
+        )
 
         # Compute log probability
         log_prob = self.compute_gaussian_log_prob(x_t_prev, mean, variance)
@@ -297,16 +319,25 @@ class RL100Policy(DP3):
 
         # Set timesteps
         scheduler.set_timesteps(self.num_inference_steps)
+        timesteps = scheduler.timesteps  # e.g. [90, 80, 70, ..., 0]
 
         # Denoising loop
-        for i, t in enumerate(scheduler.timesteps):
+        for i, t in enumerate(timesteps):
             # Apply conditioning
             x_t[condition_mask] = condition_data[condition_mask]
+
+            # Compute the ACTUAL previous timestep from the schedule
+            if i + 1 < len(timesteps):
+                t_prev = timesteps[i + 1]
+            else:
+                # Final step: t_prev = -1 signals "no more noise"
+                t_prev = torch.tensor(-1, device=x_t.device)
 
             # Denoising step with log prob
             x_t_prev, log_prob = self.denoising_step_with_log_prob(
                 x_t=x_t,
                 t=t,
+                t_prev=t_prev,
                 global_cond=global_cond,
                 return_mean=False
             )
@@ -370,10 +401,18 @@ class RL100Policy(DP3):
         new_log_probs = []
         scheduler = self.noise_scheduler
         scheduler.set_timesteps(self.num_inference_steps)
+        timesteps = scheduler.timesteps  # e.g. [90, 80, 70, ..., 0]
+        alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
-        for i, t in enumerate(scheduler.timesteps):
+        for i, t in enumerate(timesteps):
             x_t = trajectory[i]
             x_t_prev = trajectory[i + 1]
+
+            # Compute the ACTUAL previous timestep from the schedule
+            if i + 1 < len(timesteps):
+                t_prev = timesteps[i + 1]
+            else:
+                t_prev = torch.tensor(-1, device=device)
 
             # Predict noise
             noise_pred = self.model(
@@ -382,22 +421,22 @@ class RL100Policy(DP3):
                 global_cond=global_cond
             )
 
-            # Compute mean
-            alphas_cumprod = scheduler.alphas_cumprod.to(device)
             t_tensor = torch.tensor([t], device=device).expand(batch_size)
+            t_prev_tensor = torch.tensor([t_prev], device=device).expand(batch_size)
 
             alpha_t = alphas_cumprod[t_tensor].view(-1, 1, 1)
-            if t > 0:
-                alpha_t_prev = alphas_cumprod[t_tensor - 1].view(-1, 1, 1)
-            else:
-                alpha_t_prev = torch.ones_like(alpha_t)
+            alpha_t_prev = torch.where(
+                (t_prev_tensor >= 0).view(-1, 1, 1),
+                alphas_cumprod[t_prev_tensor.clamp(min=0)].view(-1, 1, 1),
+                torch.ones_like(alpha_t)
+            )
 
             pred_x0 = (x_t - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
 
             # Variance σ² (clipped, paper Eq.23)
-            variance = self.get_variance_at_timestep(t_tensor)
+            variance = self.get_variance_at_timestep(t_tensor, t_prev_tensor)
 
-            # Mean: paper Eq.5a  μ = √ᾱₘ·x̂₀ + √(1 - ᾱₘ - σ²)·εθ
+            # Mean: paper Eq.5a  μ = √ᾱ_{t_prev}·x̂₀ + √(1 - ᾱ_{t_prev} - σ²)·εθ
             noise_coeff = torch.sqrt(
                 torch.clamp(1 - alpha_t_prev - variance.view(-1, 1, 1), min=0.0)
             )

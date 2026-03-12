@@ -318,6 +318,12 @@ class IQLCritics(nn.Module):
         with torch.no_grad():
             next_v = self.v_network_target(next_obs)
             q_target = reward + self.gamma * (1 - done) * next_v
+            # Clip Q target to its theoretical upper bound to prevent
+            # bootstrapping divergence.  With reward already scaled by
+            # reward_scale, the maximum single-step return ≤ 1.0, so
+            # Q* ≤ 1.0 / (1 - gamma).  Use 3× headroom for safety.
+            q_max = 3.0 / (1.0 - self.gamma)
+            q_target = q_target.clamp(min=0.0, max=q_max)
 
         # Predict Q values
         q1_pred, q2_pred = self.q_network(obs, action, return_both=True)

@@ -400,12 +400,18 @@ R_chunk = Σ_{j=0}^{n_c-1} γ^j · R_{t+j}
 - **代码**：`max_train_episodes: 90`（加上 val_ratio=0.02 约取 2 条验证，训练实际用 90 条）
 - **分析**：少 10 条演示对 BC 初始化质量有一定影响
 
-#### [Diff-5] 点云数量不一致（Runner vs Dataset）
+#### [Diff-5] 点云数量不一致（Runner vs Dataset）【已修复 2026-03-11】
 
-- **Dataset shape_meta**：`point_cloud shape: [512, 3]`
-- **Runner 采样**：`num_points: 1024`（`metaworld_dial-turn.yaml`）
-- **现状**：`use_point_crop=true` 可能在 Runner 中将 1024 点裁剪为 512，但需确认
-- **风险**：若裁剪逻辑不一致，训练与推理的点云分布可能不同
+- **修复前**：Dataset `shape_meta` 为 `[512, 3]`，Runner 采样 `num_points=1024`
+- **修复后**：`metaworld_dial-turn.yaml` 已改为 `num_points: 512`
+- **影响**：消除训练/评测点云分布偏移，降低 VIB 场景下的性能波动风险
+
+#### [Diff-6] VIB 重建损失在 `pytorch3d_simplified` 下退化为点对点 MSE【已修复 2026-03-11】
+
+- **问题**：代码尝试 `from pytorch3d.loss import chamfer_distance`；若环境仅安装 `pytorch3d_simplified`（仅 `ops`，无 `loss`），会静默 fallback 到逐点 `MSE`
+- **原因**：点云是无序集合，逐点 MSE 不是合法的集合距离，会引入错误监督；`beta_recon` 越大，IL 越容易被该误差主导
+- **修复**：`pointnet_extractor.py` 中 fallback 改为可微 `torch.cdist` Chamfer（分块计算防 OOM），并增加一次性日志提示后端来源
+- **额外改进**：移除“强制采样到同点数再计算重建损失”的逻辑，直接支持不同点数的 Chamfer
 
 ---
 

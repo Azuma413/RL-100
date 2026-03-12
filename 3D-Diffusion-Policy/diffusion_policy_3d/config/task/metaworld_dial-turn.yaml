@@ -25,7 +25,7 @@ env_runner:
   task_name: ${task_name}
   device: ${training.device}
   use_point_crop: ${policy.use_point_crop}
-  num_points: 1024
+  num_points: 512
 
 dataset:
   _target_: diffusion_policy_3d.dataset.metaworld_dataset.MetaworldDataset

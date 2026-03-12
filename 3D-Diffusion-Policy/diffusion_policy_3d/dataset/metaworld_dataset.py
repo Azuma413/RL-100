@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import copy
 import zarr
+from termcolor import cprint
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 from diffusion_policy_3d.common.sampler import (
@@ -56,6 +57,41 @@ class MetaworldDataset(BaseDataset):
         self.pad_after = pad_after
         self.n_action_steps = n_action_steps
         self.gamma = gamma
+        self._shape_mismatch_warned = False
+
+    @staticmethod
+    def _align_point_cloud_shape(point_cloud: np.ndarray, target_shape: tuple) -> np.ndarray:
+        """
+        Align point cloud array to replay buffer shape [T, N_target, C_target].
+
+        - Channel mismatch: crop or zero-pad last dim.
+        - Point-count mismatch: deterministic resample (linspace index) or repeat.
+        """
+        if point_cloud.ndim != 3:
+            raise ValueError(f"point_cloud must be rank-3 [T, N, C], got shape={point_cloud.shape}")
+
+        target_n, target_c = target_shape
+        pc = point_cloud
+
+        # Align channels first.
+        cur_c = pc.shape[-1]
+        if cur_c > target_c:
+            pc = pc[..., :target_c]
+        elif cur_c < target_c:
+            pad_width = ((0, 0), (0, 0), (0, target_c - cur_c))
+            pc = np.pad(pc, pad_width=pad_width, mode='constant')
+
+        # Align number of points.
+        cur_n = pc.shape[1]
+        if cur_n > target_n:
+            # Deterministic uniform index selection to keep behavior reproducible.
+            indices = np.linspace(0, cur_n - 1, target_n, dtype=np.int64)
+            pc = pc[:, indices, :]
+        elif cur_n < target_n:
+            repeat_factor = (target_n + cur_n - 1) // cur_n
+            pc = np.tile(pc, (1, repeat_factor, 1))[:, :target_n, :]
+
+        return pc.astype(np.float32, copy=False)
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -157,14 +193,58 @@ class MetaworldDataset(BaseDataset):
             return 0
 
         n_new_steps = 0
+        target_state_shape = tuple(self.replay_buffer['state'].shape[1:])
+        target_action_shape = tuple(self.replay_buffer['action'].shape[1:])
+        target_pc_shape = tuple(self.replay_buffer['point_cloud'].shape[1:])
+
         for ep in episodes:
+            state = np.asarray(ep['state'], dtype=np.float32)
+            action = np.asarray(ep['action'], dtype=np.float32)
+            point_cloud = np.asarray(ep['point_cloud'], dtype=np.float32)
+            reward = np.asarray(
+                ep.get('reward', np.zeros(len(state), dtype=np.float32)),
+                dtype=np.float32
+            ).reshape(-1)
+            done = np.asarray(
+                ep.get('done', np.zeros(len(state), dtype=np.float32)),
+                dtype=np.float32
+            ).reshape(-1)
+
+            if state.shape[1:] != target_state_shape:
+                raise ValueError(
+                    f"State shape mismatch: episode {state.shape[1:]} vs replay_buffer {target_state_shape}"
+                )
+            if action.shape[1:] != target_action_shape:
+                raise ValueError(
+                    f"Action shape mismatch: episode {action.shape[1:]} vs replay_buffer {target_action_shape}"
+                )
+            if point_cloud.shape[1:] != target_pc_shape:
+                original_shape = point_cloud.shape
+                point_cloud = self._align_point_cloud_shape(point_cloud, target_pc_shape)
+                if not self._shape_mismatch_warned:
+                    cprint(
+                        f"[MetaworldDataset] point_cloud shape mismatch detected. "
+                        f"Auto-aligned from {original_shape[1:]} to {point_cloud.shape[1:]} "
+                        f"to match replay buffer.",
+                        "yellow"
+                    )
+                    self._shape_mismatch_warned = True
+
+            T = len(state)
+            if not (len(action) == len(point_cloud) == len(reward) == len(done) == T):
+                raise ValueError(
+                    "Episode length mismatch among fields: "
+                    f"state={len(state)}, action={len(action)}, point_cloud={len(point_cloud)}, "
+                    f"reward={len(reward)}, done={len(done)}"
+                )
+
             # Ensure reward/done exist (add zeros if this is demo data without RL labels)
             ep_data = {
-                'state':       ep['state'],
-                'action':      ep['action'],
-                'point_cloud': ep['point_cloud'],
-                'reward':      ep.get('reward', np.zeros(len(ep['state']), dtype=np.float32)),
-                'done':        ep.get('done',   np.zeros(len(ep['state']), dtype=np.float32)),
+                'state': state,
+                'action': action,
+                'point_cloud': point_cloud,
+                'reward': reward,
+                'done': done,
             }
 
             self.replay_buffer.add_episode(ep_data)
