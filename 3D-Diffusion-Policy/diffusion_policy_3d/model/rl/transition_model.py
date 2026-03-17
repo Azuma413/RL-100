@@ -360,7 +360,7 @@ class TransitionModel:
         max_epochs_since_update: int = 5,
         holdout_ratio: float = 0.2,
         logvar_loss_coef: float = 0.01,
-    ) -> float:
+    ) -> Dict[str, object]:
         """
         Train the ensemble transition model.
 
@@ -371,7 +371,7 @@ class TransitionModel:
           4. Elite selection via holdout MSE; early stop when no improvement.
 
         Returns:
-            Final mean holdout MSE across elite members.
+            Dictionary with final holdout loss and per-epoch train/val histories.
         """
         cprint("\n[TransitionModel] Encoding dataset for transition model training...", "cyan")
         inputs, targets = self._build_feature_dataset(
@@ -401,6 +401,8 @@ class TransitionModel:
 
         holdout_losses = [1e10] * self.model.num_ensemble
         cnt = 0
+        train_loss_history: List[float] = []
+        val_loss_history: List[float] = []
 
         for epoch in range(max_epochs):
             train_loss = self._learn_epoch(
@@ -408,6 +410,8 @@ class TransitionModel:
                 batch_size, logvar_loss_coef)
             new_holdout_losses = self._validate(hold_in_s, hold_tgt)
             val_loss = float(np.sort(new_holdout_losses)[:self.model.num_elites].mean())
+            train_loss_history.append(float(train_loss))
+            val_loss_history.append(float(val_loss))
 
             data_idxes = shuffle_rows(data_idxes)
 
@@ -442,7 +446,12 @@ class TransitionModel:
         final_val = float(np.sort(holdout_losses)[:self.model.num_elites].mean())
         cprint(f"[TransitionModel] Training complete. "
                f"Elites={elites}, val_loss={final_val:.5f}", "green")
-        return final_val
+        return {
+            'final_val_loss': final_val,
+            'train_loss_history': train_loss_history,
+            'val_loss_history': val_loss_history,
+            'elites': elites,
+        }
 
     def _learn_epoch(
         self,

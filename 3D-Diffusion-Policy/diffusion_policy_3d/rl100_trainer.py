@@ -180,6 +180,8 @@ class RL100Trainer:
         self.global_step = 0
         self.epoch = 0
         self.offline_rl_iteration = 0
+        self.offline_collection_success_history = []
+        self.online_collection_success_history = []
 
     def _encode_obs_representations(
         self,
@@ -259,7 +261,8 @@ class RL100Trainer:
         loss_history: list,
         title: str,
         ylabel: str,
-        filename: str
+        filename: str,
+        xlabel: str = "Epoch",
     ) -> Optional[str]:
         """
         Save loss curve with:
@@ -315,7 +318,7 @@ class RL100Trainer:
         ax_zoom.plot(x, y, color="#d62728", linewidth=1.8)
         ax_zoom.set_ylim(zlow, zhigh)
         ax_zoom.set_ylabel(f"{ylabel} (0-1)")
-        ax_zoom.set_xlabel("Epoch")
+        ax_zoom.set_xlabel(xlabel)
         ax_zoom.grid(True, alpha=0.35)
 
         fig.tight_layout()
@@ -324,6 +327,21 @@ class RL100Trainer:
 
         cprint(f"[Plot] Saved: {save_path}", "cyan")
         return save_path
+
+    def _save_iteration_metric_plot(
+        self,
+        metric_history: list,
+        title: str,
+        ylabel: str,
+        filename: str,
+    ) -> Optional[str]:
+        return self._save_loss_curve_plot(
+            loss_history=metric_history,
+            title=title,
+            ylabel=ylabel,
+            filename=filename,
+            xlabel="Iteration",
+        )
 
     def train_imitation_learning(
         self,
@@ -495,7 +513,7 @@ class RL100Trainer:
 
         # Freeze encoder during transition model training
         self.policy.eval()
-        val_loss = self.transition_model.train_on_dataset(
+        transition_metrics = self.transition_model.train_on_dataset(
             policy=self.policy,
             dataset=dataset,
             batch_size=self.config.dataloader.batch_size,
@@ -503,14 +521,39 @@ class RL100Trainer:
             max_epochs=max_epochs,
             max_epochs_since_update=max_epochs_since_update,
         )
+        val_loss = float(transition_metrics['final_val_loss'])
+        train_loss_history = transition_metrics.get('train_loss_history', [])
+        val_loss_history = transition_metrics.get('val_loss_history', [])
+
+        train_plot_path = self._save_loss_curve_plot(
+            loss_history=train_loss_history,
+            title=f"Transition Train Loss (iter {int(self.offline_rl_iteration)})",
+            ylabel="Train Loss",
+            filename=f"transition_train_loss_iter_{int(self.offline_rl_iteration):02d}.png"
+        )
+        val_plot_path = self._save_loss_curve_plot(
+            loss_history=val_loss_history,
+            title=f"Transition Val Loss (iter {int(self.offline_rl_iteration)})",
+            ylabel="Val Loss",
+            filename=f"transition_val_loss_iter_{int(self.offline_rl_iteration):02d}.png"
+        )
 
         if self.config.logging.use_wandb and self.config.logging.use_wandb:
-            wandb.log({
+            log_dict = {
                 'transition/val_loss': val_loss,
                 'transition/iteration': self.offline_rl_iteration,
-            }, step=self.global_step)
+            }
+            if train_plot_path is not None:
+                log_dict['transition/train_loss_curve'] = wandb.Image(train_plot_path)
+            if val_plot_path is not None:
+                log_dict['transition/val_loss_curve'] = wandb.Image(val_plot_path)
+            wandb.log(log_dict, step=self.global_step)
 
-        return {'transition_val_loss': val_loss}
+        return {
+            'transition_val_loss': val_loss,
+            'train_loss_history': train_loss_history,
+            'val_loss_history': val_loss_history,
+        }
 
     def train_iql_critics(
         self,
@@ -877,6 +920,9 @@ class RL100Trainer:
             ppo_losses = []
             cd_losses = []
             reg_losses = []
+            grad_norms = []
+            approx_kls = []
+            clip_fracs = []
 
             for batch_idx, batch in enumerate(train_dataloader):
                 batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
@@ -922,20 +968,27 @@ class RL100Trainer:
                             obs_dict,
                             global_cond=global_cond,
                         )
-                        total_loss = ppo_loss + lambda_cd * cd_loss
+                        total_loss = total_loss + lambda_cd * cd_loss
                         cd_losses.append(cd_info['cd_loss'])
 
                     self.policy_optimizer.zero_grad()
                     # Also zero CD optimizer if joint
                     self.consistency_optimizer.zero_grad()
                     total_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config.training.max_grad_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.policy.parameters(),
+                        config.training.max_grad_norm
+                    )
+                    grad_norms.append(float(grad_norm))
                     self.policy_optimizer.step()
                     # Update consistency model params too
                     if run_cd_step:
                         self.consistency_optimizer.step()
 
-                ppo_losses.append(ppo_loss.item())
+                ppo_loss_display = float(-ppo_loss.item())
+                ppo_losses.append(ppo_loss_display)
+                approx_kls.append(float(ppo_info.get('approx_kl', 0.0)))
+                clip_fracs.append(float(ppo_info.get('clip_frac', 0.0)))
 
                 # Update EMA
                 if self.ema_policy is not None:
@@ -944,7 +997,8 @@ class RL100Trainer:
                 # Log
                 if self.global_step % config.training.log_every == 0 and config.logging.use_wandb:
                     log_dict = {
-                        'ppo/loss': ppo_loss.item(),
+                        'ppo/loss': ppo_loss_display,
+                        'ppo/grad_norm': grad_norms[-1] if grad_norms else 0.0,
                         **{f'ppo/{k}': v for k, v in ppo_info.items()}
                     }
                     if reg_losses:
@@ -955,10 +1009,14 @@ class RL100Trainer:
 
                 self.global_step += 1
 
-            cprint(f"[Offline RL] Epoch {epoch}/{num_epochs}, PPO Loss: {np.mean(ppo_losses):.4f}, "
+            epoch_ppo_loss = float(np.mean(ppo_losses) if ppo_losses else 0.0)
+            cprint(f"[Offline RL] Epoch {epoch}/{num_epochs}, PPO Loss: {epoch_ppo_loss:.4f}, "
+                   f"KL: {np.mean(approx_kls) if approx_kls else 0.0:.6f}, "
+                   f"ClipFrac: {np.mean(clip_fracs) if clip_fracs else 0.0:.4f}, "
+                   f"GradNorm: {np.mean(grad_norms) if grad_norms else 0.0:.4f}, "
                    f"Reg Loss: {np.mean(reg_losses) if reg_losses else 0:.4f}, "
                    f"CD Loss: {np.mean(cd_losses) if cd_losses else 0:.4f}", "green")
-            ppo_loss_per_epoch.append(float(np.mean(ppo_losses) if ppo_losses else 0.0))
+            ppo_loss_per_epoch.append(epoch_ppo_loss)
 
         ppo_loss_plot_path = self._save_loss_curve_plot(
             loss_history=ppo_loss_per_epoch,
@@ -1094,6 +1152,7 @@ class RL100Trainer:
         self,
         online_episodes: List[dict],
         num_epochs: int,
+        online_iteration: Optional[int] = None,
     ) -> Dict:
         """
         Phase 3: On-policy online RL with GAE advantages and PPO updates.
@@ -1186,8 +1245,10 @@ class RL100Trainer:
         batch_size = min(config.dataloader.batch_size, len(rollout_buffer))
         critic_indices = np.arange(len(rollout_buffer))
         v_losses = []
+        v_loss_per_epoch = []
         for critic_epoch in range(5):
             np.random.shuffle(critic_indices)
+            epoch_v_losses = []
             for start in range(0, len(critic_indices), batch_size):
                 idx = critic_indices[start:start + batch_size]
                 obs_features = torch.stack([rollout_buffer[i]['obs_features'] for i in idx]).to(self.device)
@@ -1205,6 +1266,9 @@ class RL100Trainer:
                 self.v_optimizer.step()
                 self.critics.update_target_network(tau=config.critics.target_update_tau)
                 v_losses.append(v_loss.item())
+                epoch_v_losses.append(v_loss.item())
+            if epoch_v_losses:
+                v_loss_per_epoch.append(float(np.mean(epoch_v_losses)))
 
         # On-policy PPO over the stored rollout buffer.
         self.policy.train()
@@ -1212,12 +1276,18 @@ class RL100Trainer:
         ppo_losses = []
         cd_losses = []
         reg_losses = []
+        grad_norms = []
+        approx_kls = []
+        clip_fracs = []
         policy_indices = np.arange(len(rollout_buffer))
         for epoch in range(num_epochs):
             np.random.shuffle(policy_indices)
             epoch_ppo_losses = []
             epoch_cd_losses = []
             epoch_reg_losses = []
+            epoch_grad_norms = []
+            epoch_approx_kls = []
+            epoch_clip_fracs = []
             for start in range(0, len(policy_indices), batch_size):
                 idx = policy_indices[start:start + batch_size]
                 obs_dict = {
@@ -1266,13 +1336,17 @@ class RL100Trainer:
                         obs_dict,
                         global_cond=global_cond,
                     )
-                    total_loss = ppo_loss + lambda_cd * cd_loss
+                    total_loss = total_loss + lambda_cd * cd_loss
                     epoch_cd_losses.append(cd_info['cd_loss'])
 
                 self.policy_optimizer.zero_grad()
                 self.consistency_optimizer.zero_grad()
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config.training.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(),
+                    config.training.max_grad_norm
+                )
+                epoch_grad_norms.append(float(grad_norm))
                 self.policy_optimizer.step()
                 if run_cd_step:
                     self.consistency_optimizer.step()
@@ -1281,8 +1355,10 @@ class RL100Trainer:
                     self.ema.step(self.policy)
 
                 if config.logging.use_wandb and self.global_step % config.training.log_every == 0:
+                    ppo_loss_display = float(-ppo_loss.item())
                     log_dict = {
-                        'online/ppo_loss': ppo_loss.item(),
+                        'online/ppo_loss': ppo_loss_display,
+                        'online/grad_norm': epoch_grad_norms[-1] if epoch_grad_norms else 0.0,
                         **{f'online/{k}': v for k, v in ppo_info.items()}
                     }
                     if epoch_reg_losses:
@@ -1292,7 +1368,9 @@ class RL100Trainer:
                     wandb.log(log_dict, step=self.global_step)
 
                 self.global_step += 1
-                epoch_ppo_losses.append(ppo_loss.item())
+                epoch_ppo_losses.append(float(-ppo_loss.item()))
+                epoch_approx_kls.append(float(ppo_info.get('approx_kl', 0.0)))
+                epoch_clip_fracs.append(float(ppo_info.get('clip_frac', 0.0)))
 
             if epoch_ppo_losses:
                 ppo_losses.append(float(np.mean(epoch_ppo_losses)))
@@ -1300,17 +1378,92 @@ class RL100Trainer:
                 cd_losses.append(float(np.mean(epoch_cd_losses)))
             if epoch_reg_losses:
                 reg_losses.append(float(np.mean(epoch_reg_losses)))
+            if epoch_grad_norms:
+                grad_norms.append(float(np.mean(epoch_grad_norms)))
+            if epoch_approx_kls:
+                approx_kls.append(float(np.mean(epoch_approx_kls)))
+            if epoch_clip_fracs:
+                clip_fracs.append(float(np.mean(epoch_clip_fracs)))
             cprint(
                 f"[Online RL] Epoch {epoch + 1}/{num_epochs}, "
                 f"PPO Loss: {np.mean(epoch_ppo_losses) if epoch_ppo_losses else 0.0:.4f}, "
+                f"KL: {np.mean(epoch_approx_kls) if epoch_approx_kls else 0.0:.6f}, "
+                f"ClipFrac: {np.mean(epoch_clip_fracs) if epoch_clip_fracs else 0.0:.4f}, "
+                f"GradNorm: {np.mean(epoch_grad_norms) if epoch_grad_norms else 0.0:.4f}, "
                 f"Reg Loss: {np.mean(epoch_reg_losses) if epoch_reg_losses else 0.0:.4f}, "
                 f"CD Loss: {np.mean(epoch_cd_losses) if epoch_cd_losses else 0.0:.4f}",
                 "green",
             )
 
+        iter_tag = int(online_iteration) if online_iteration is not None else 0
+        online_v_plot_path = self._save_loss_curve_plot(
+            loss_history=v_loss_per_epoch,
+            title=f"Online V Loss (iter {iter_tag})",
+            ylabel="V Loss",
+            filename=f"online_v_loss_iter_{iter_tag:02d}.png"
+        )
+        online_ppo_plot_path = self._save_loss_curve_plot(
+            loss_history=ppo_losses,
+            title=f"Online PPO Loss (iter {iter_tag})",
+            ylabel="PPO Loss",
+            filename=f"online_ppo_loss_iter_{iter_tag:02d}.png"
+        )
+        online_kl_plot_path = self._save_loss_curve_plot(
+            loss_history=approx_kls,
+            title=f"Online PPO KL (iter {iter_tag})",
+            ylabel="Approx KL",
+            filename=f"online_ppo_kl_iter_{iter_tag:02d}.png"
+        )
+        online_clip_plot_path = self._save_loss_curve_plot(
+            loss_history=clip_fracs,
+            title=f"Online PPO ClipFrac (iter {iter_tag})",
+            ylabel="ClipFrac",
+            filename=f"online_ppo_clipfrac_iter_{iter_tag:02d}.png"
+        )
+        online_grad_plot_path = self._save_loss_curve_plot(
+            loss_history=grad_norms,
+            title=f"Online PPO GradNorm (iter {iter_tag})",
+            ylabel="GradNorm",
+            filename=f"online_ppo_gradnorm_iter_{iter_tag:02d}.png"
+        )
+        online_reg_plot_path = self._save_loss_curve_plot(
+            loss_history=reg_losses,
+            title=f"Online Reg Loss (iter {iter_tag})",
+            ylabel="Reg Loss",
+            filename=f"online_reg_loss_iter_{iter_tag:02d}.png"
+        )
+        online_cd_plot_path = self._save_loss_curve_plot(
+            loss_history=cd_losses,
+            title=f"Online CD Loss (iter {iter_tag})",
+            ylabel="CD Loss",
+            filename=f"online_cd_loss_iter_{iter_tag:02d}.png"
+        )
+        if config.logging.use_wandb:
+            image_logs = {}
+            if online_v_plot_path is not None:
+                image_logs['online/v_loss_curve'] = wandb.Image(online_v_plot_path)
+            if online_ppo_plot_path is not None:
+                image_logs['online/ppo_loss_curve'] = wandb.Image(online_ppo_plot_path)
+            if online_kl_plot_path is not None:
+                image_logs['online/ppo_kl_curve'] = wandb.Image(online_kl_plot_path)
+            if online_clip_plot_path is not None:
+                image_logs['online/ppo_clipfrac_curve'] = wandb.Image(online_clip_plot_path)
+            if online_grad_plot_path is not None:
+                image_logs['online/ppo_gradnorm_curve'] = wandb.Image(online_grad_plot_path)
+            if online_reg_plot_path is not None:
+                image_logs['online/reg_loss_curve'] = wandb.Image(online_reg_plot_path)
+            if online_cd_plot_path is not None:
+                image_logs['online/cd_loss_curve'] = wandb.Image(online_cd_plot_path)
+            if image_logs:
+                image_logs['online/iteration'] = iter_tag
+                wandb.log(image_logs, step=self.global_step)
+
         return {
             'v_loss': float(np.mean(v_losses)) if v_losses else 0.0,
             'ppo_loss': float(np.mean(ppo_losses)) if ppo_losses else 0.0,
+            'grad_norm': float(np.mean(grad_norms)) if grad_norms else 0.0,
+            'approx_kl': float(np.mean(approx_kls)) if approx_kls else 0.0,
+            'clip_frac': float(np.mean(clip_fracs)) if clip_fracs else 0.0,
             'reg_loss': float(np.mean(reg_losses)) if reg_losses else 0.0,
             'cd_loss': float(np.mean(cd_losses)) if cd_losses else 0.0,
             'n_decisions': len(rollout_buffer),
@@ -1444,6 +1597,19 @@ class RL100Trainer:
                 num_episodes=config.training.collection_episodes,
                 use_ema=False,
             )
+            self.offline_collection_success_history.append(
+                float(collection_metrics.get('mean_success_rates', 0.0))
+            )
+            offline_collection_plot_path = self._save_iteration_metric_plot(
+                metric_history=self.offline_collection_success_history,
+                title="Offline Collection Success Rate",
+                ylabel="Success Rate",
+                filename="offline_collection_success_rate.png",
+            )
+            if config.logging.use_wandb and offline_collection_plot_path is not None:
+                wandb.log({
+                    'collection/offline_success_curve': wandb.Image(offline_collection_plot_path),
+                }, step=self.global_step)
             new_episodes = self._filter_episodes_for_merge(new_episodes, stage='offline collection')
 
             # Algorithm 1 Line 11: D_{m+1} = D_m ∪ D_new
@@ -1492,6 +1658,19 @@ class RL100Trainer:
                     policy_mode='ddim',
                     use_ema=False,
                 )
+                self.online_collection_success_history.append(
+                    float(collection_metrics.get('mean_success_rates', 0.0))
+                )
+                online_collection_plot_path = self._save_iteration_metric_plot(
+                    metric_history=self.online_collection_success_history,
+                    title="Online Collection Success Rate",
+                    ylabel="Success Rate",
+                    filename="online_collection_success_rate.png",
+                )
+                if config.logging.use_wandb and online_collection_plot_path is not None:
+                    wandb.log({
+                        'collection/online_success_curve': wandb.Image(online_collection_plot_path),
+                    }, step=self.global_step)
                 online_episodes = self._filter_episodes_for_merge(online_episodes, stage='online collection')
 
                 if not online_episodes:
@@ -1506,7 +1685,8 @@ class RL100Trainer:
                 _apply_vib_betas(0.1)
                 self.online_rl_optimize(
                     online_episodes=online_episodes,
-                    num_epochs=min(20, config.training.ppo_epochs)
+                    num_epochs=min(20, config.training.ppo_epochs),
+                    online_iteration=online_iter,
                 )
                 _apply_vib_betas(1.0)
 

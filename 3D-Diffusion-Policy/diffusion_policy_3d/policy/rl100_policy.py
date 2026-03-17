@@ -521,11 +521,18 @@ class RL100Policy(DP3):
         # Compute PPO loss for each step
         ppo_losses = []
         ratios = []
+        approx_kls = []
+        clip_fracs = []
 
         for k, log_prob_new in new_log_probs:
             # Probability ratio
-            ratio = torch.exp(log_prob_new - old_log_probs[k])
+            log_ratio = log_prob_new - old_log_probs[k]
+            ratio = torch.exp(log_ratio)
             ratios.append(ratio.mean().item())
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
+            clip_frac = ((ratio - 1.0).abs() > self.ppo_clip_eps).float().mean()
+            approx_kls.append(approx_kl.item())
+            clip_fracs.append(clip_frac.item())
 
             # Clipped ratio
             ratio_clipped = torch.clamp(
@@ -551,6 +558,8 @@ class RL100Policy(DP3):
             'mean_ratio': sum(ratios) / len(ratios),
             'min_ratio': min(ratios),
             'max_ratio': max(ratios),
+            'approx_kl': sum(approx_kls) / len(approx_kls),
+            'clip_frac': sum(clip_fracs) / len(clip_fracs),
             'mean_advantage': advantages.mean().item(),
             'std_advantage': advantages.std().item(),
         }
