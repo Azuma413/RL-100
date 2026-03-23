@@ -152,6 +152,7 @@ class SimRL100Trainer:
         self.rl_roots: list[Path] = [self.base_dataset_root]
         self.il_specs: list[RolloutDatasetSpec] = [RolloutDatasetSpec(root=self.base_dataset_root, success_episodes=[])]
         self.step = 0
+        self.log_step = 0
         self.history: list[dict[str, Any]] = []
         self.wandb_run = None
 
@@ -200,11 +201,13 @@ class SimRL100Trainer:
             namespace = self._metric_namespace(metrics)
             payload: dict[str, float | int | str] = {}
             for key, value in metrics.items():
-                if key in {"phase", "step", "iteration"}:
+                if key in {"phase", "iteration"}:
                     payload[key] = value
                 else:
                     payload[f"{namespace}/{key}"] = value
-            self.wandb_run.log(payload, step=self.step, commit=commit)
+            payload[f"{namespace}/trainer_step"] = float(self.step)
+            self.wandb_run.log(payload, step=self.log_step, commit=commit)
+            self.log_step += 1
 
     def _record_metrics(self, metrics: dict[str, Any], *, commit: bool = True) -> dict[str, Any]:
         self._log_metrics(metrics, commit=commit)
