@@ -1,9 +1,31 @@
+import logging
+from pathlib import Path
+import random
+
+import cv2
 import genesis as gs
 import numpy as np
-from gymnasium import spaces
-import random
 import torch
-import cv2
+from gymnasium import spaces
+
+PANDA_MJCF_PATH = Path(__file__).resolve().parents[4] / "3d_model" / "franka_emika_panda" / "panda.xml"
+
+_SUPPRESSED_GENESIS_WARNINGS = (
+    "Neutral robot position (qpos0) exceeds joint limits.",
+    "Filtered out geometry pairs causing self-collision for the neutral configuration (qpos0):",
+)
+
+
+class _GenesisWarningFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return not any(warning in message for warning in _SUPPRESSED_GENESIS_WARNINGS)
+
+
+def _configure_genesis_logging():
+    genesis_logger = logging.getLogger("genesis")
+    if not any(isinstance(existing_filter, _GenesisWarningFilter) for existing_filter in genesis_logger.filters):
+        genesis_logger.addFilter(_GenesisWarningFilter())
 
 joints_name = (
     "joint1",
@@ -36,6 +58,7 @@ class NormalTask:
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(AGENT_DIM,), dtype=np.float32)
 
     def _build_scene(self, show_viewer):
+        _configure_genesis_logging()
         if not gs._initialized:
             print("Genesis is not initialized, initializing now...")
             if self.device == "cuda":
@@ -55,7 +78,7 @@ class NormalTask:
             rigid_options=gs.options.RigidOptions(
                 box_box_detection=True,
                 # noslip_iterations=5,
-                # constraint_timeconst=0.001,
+                constraint_timeconst=0.02,
             ),
             show_viewer=show_viewer,
         )
@@ -63,7 +86,7 @@ class NormalTask:
             morph=gs.morphs.Plane(),
             surface=gs.surfaces.Plastic(diffuse_texture=gs.textures.ImageTexture(image_path="images/wood.jpg"))
         )
-        self.franka = self.scene.add_entity(gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"))
+        self.franka = self.scene.add_entity(gs.morphs.MJCF(file=str(PANDA_MJCF_PATH)))
         if self.num_cubes >= 1:
             self.cubeR = self.scene.add_entity(
                 gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.65, 0.0, 0.025)),
