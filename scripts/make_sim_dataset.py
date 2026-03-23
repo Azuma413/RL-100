@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 import os
+import traceback
 from rl_100.env.genesis_env import GenesisEnv
 from rl_100.env.tasks.normal import joints_name, AGENT_DIM
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -166,7 +167,13 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             dataset.save_episode()
         except Exception as e:
             print(f"⚠️ Error occurred during episode {ep+1}: {e}")
+            traceback.print_exc()
             print("🔄 Retrying episode...")
+            if dataset is not None and getattr(dataset, "episode_buffer", None) is not None:
+                try:
+                    dataset.clear_episode_buffer(delete_images=True)
+                except Exception as clear_error:
+                    print(f"⚠️ Failed to clear dataset episode buffer: {clear_error}")
             env.close()
             env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
             continue
@@ -188,7 +195,7 @@ if __name__ == "__main__":
             "release": 60 # cubeを離す
         }
         
-        main(episode_num=100, task=task, stage_dict=stage_dict, observation_height=224, observation_width=224, show_viewer=False)
+        main(episode_num=50, task=task, stage_dict=stage_dict, observation_height=224, observation_width=224, show_viewer=False)
 
-# normal: 音は関係なく，赤，青，緑のCubeから指定された色のCubeを箱に入れるタスク
-# normal-fix: 音は関係なく，赤色のCubeを箱に入れるタスク
+# normal: 赤，青，緑のCubeから言語で指定された色のCubeを箱に入れるタスク
+# normal-fix: 赤，青，緑のCubeから赤色のCubeを箱に入れるタスク
