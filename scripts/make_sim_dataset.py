@@ -1,9 +1,17 @@
 import numpy as np
-from PIL import Image
 import os
+import sys
 import traceback
+from pathlib import Path
+
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "lerobot" / "src"))
+
 from rl_100.env.genesis_env import GenesisEnv
-from rl_100.env.tasks.normal import joints_name, AGENT_DIM
+from rl_100.lerobot_dataset_utils import build_frame, create_lerobot_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 saved_cube_pos = None
@@ -81,37 +89,12 @@ def expert_policy(env, stage, target_cube_name=None):
     return action.astype(np.float32)
 
 def initialize_dataset(env: GenesisEnv) -> LeRobotDataset:
-    task = env.task
-    height = env.observation_height
-    width = env.observation_width
     dict_idx = 0
-    dataset_path = f"datasets/{task}_{dict_idx}"
-    while os.path.exists(f"datasets/{task}_{dict_idx}"):
+    dataset_path = f"datasets/{env.task}_{dict_idx}"
+    while os.path.exists(f"datasets/{env.task}_{dict_idx}"):
         dict_idx += 1
-        dataset_path = f"datasets/{task}_{dict_idx}"
-    # env.observation_spaceの内容に基づいてfeaturesを定義
-    features = {"action": {"dtype": "float32", "shape": (AGENT_DIM,), "names": joints_name}}
-    for key, space in env.observation_space.spaces.items():
-        if key == "observation.state":
-            states_name = [
-                "eef_pos_x", "eef_pos_y", "eef_pos_z",
-                "eef_quat_w", "eef_quat_x", "eef_quat_y", "eef_quat_z",
-                "grip_left", "grip_right",
-            ]
-            features[key] = {"dtype": "float32", "shape": (9,), "names": states_name}
-        elif key.startswith("observation.images"):
-            features[key] = {"dtype": "video", "shape": (height, width, 3), "names": ("height", "width", "channels")}
-    lerobot_dataset = LeRobotDataset.create(
-        repo_id=None,
-        fps=30,
-        root=dataset_path,
-        robot_type="franka",
-        use_videos=True,
-        features=features,
-        batch_encoding_size=10,
-        # batch_encoding_size=1,
-    )
-    return lerobot_dataset
+        dataset_path = f"datasets/{env.task}_{dict_idx}"
+    return create_lerobot_dataset(dataset_path, env, include_rl_labels=True)
 
 def main(task, stage_dict, observation_height=480, observation_width=640, episode_num=1, show_viewer=False):
     env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
@@ -122,6 +105,9 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             print(f"\n🎬 Starting episode {ep+1}")
             env.reset()
             obs_dict = {"action": []}
+            reward_history = []
+            done_history = []
+            success_history = []
             for key in env.observation_space.spaces.keys():
                 obs_dict[key] = []
             save_flag = False
@@ -148,22 +134,41 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
                             obs_dict[key].append(current_obs[key])
                     
                     # アクションを実行して次の観測を取得
-                    current_obs, reward, _, _, _ = env.step(action)
-                    
-                    if reward > 0:
+                    current_obs, reward, terminated, truncated, info = env.step(action)
+                    success = bool(info.get("is_success", reward > 0))
+                    done = bool(terminated or truncated)
+                    reward_history.append(float(reward))
+                    done_history.append(done)
+                    success_history.append(success)
+
+                    if success:
                         save_flag = True
+                        break
+                if save_flag:
+                    break
             if not save_flag:
                 print(f"🚫 Skipping episode {ep+1}")
                 continue
             print(f"✅ Saving episode {ep+1}")
             ep += 1
             for i in range(len(obs_dict["action"])):
-                obs = {"task": env.get_task_description()}
-                for key in obs_dict.keys():
-                    if key.startswith("observation.images") and isinstance(obs_dict[key][i], Image.Image):
-                        obs_dict[key][i] = np.array(obs_dict[key][i])
-                    obs[key] = obs_dict[key][i]
-                dataset.add_frame(obs)
+                frame_obs = {}
+                for key in env.observation_space.spaces.keys():
+                    value = obs_dict[key][i]
+                    if key.startswith("observation.images") and isinstance(value, Image.Image):
+                        value = np.array(value)
+                    frame_obs[key] = value
+                is_last = i == len(obs_dict["action"]) - 1
+                dataset.add_frame(
+                    build_frame(
+                        numpy_observation=frame_obs,
+                        action=obs_dict["action"][i],
+                        task=env.get_task_description(),
+                        reward=reward_history[i],
+                        done=done_history[i] if i < len(done_history) else is_last,
+                        success=success_history[i] if i < len(success_history) else is_last and save_flag,
+                    )
+                )
             dataset.save_episode()
         except Exception as e:
             print(f"⚠️ Error occurred during episode {ep+1}: {e}")
@@ -177,6 +182,7 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
             env.close()
             env = GenesisEnv(task=task, observation_height=observation_height, observation_width=observation_width, show_viewer=show_viewer)
             continue
+    dataset.finalize()
     env.close()
 if __name__ == "__main__":
     # datasetを作成したいタスクを指定
