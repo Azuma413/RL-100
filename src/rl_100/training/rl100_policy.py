@@ -1,17 +1,13 @@
 from __future__ import annotations
-
 from collections import deque
 from dataclasses import dataclass
-
 import torch
 from torch import Tensor
-
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.utils import populate_queues
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-
 
 @PreTrainedConfig.register_subclass("rl100_diffusion")
 @dataclass

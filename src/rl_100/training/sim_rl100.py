@@ -1,16 +1,14 @@
 from __future__ import annotations
-
 import json
 import copy
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+import logging
 from pathlib import Path
 from typing import Any
-
 import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, DataLoader
-
 from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.utils import dataset_to_policy_features
@@ -25,8 +23,6 @@ from rl_100.training.rl100_critics import IQLCritics
 from rl_100.training.rl100_dataset import RL100TransitionDataset, RolloutDatasetSpec, configure_hf_cache
 from rl_100.training.rl100_policy import RL100DiffusionConfig, RL100DiffusionPolicy
 from rl_100.training.rl100_transition import TransitionModel
-from lerobot.utils.constants import OBS_IMAGES
-
 
 @dataclass
 class SimRL100Config:
@@ -95,6 +91,11 @@ class SimRL100Config:
     ope_seed: int = 42
     ope_shuffle_batches: bool = True
     ope_use_common_random_numbers: bool = True
+    use_wandb: bool = False
+    wandb_project: str = "rl100-lerobot"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_tags: tuple[str, ...] = ()
 
 
 class SimRL100Trainer:
@@ -152,6 +153,62 @@ class SimRL100Trainer:
         self.il_specs: list[RolloutDatasetSpec] = [RolloutDatasetSpec(root=self.base_dataset_root, success_episodes=[])]
         self.step = 0
         self.history: list[dict[str, Any]] = []
+        self.wandb_run = None
+
+    def _init_wandb(self) -> None:
+        if not self.cfg.use_wandb:
+            return
+        try:
+            import wandb
+        except ImportError:
+            logging.warning("wandb is not installed; disabling wandb logging.")
+            self.cfg.use_wandb = False
+            return
+        self.wandb_run = wandb.init(
+            project=self.cfg.wandb_project,
+            entity=self.cfg.wandb_entity,
+            name=self.cfg.wandb_run_name,
+            tags=list(self.cfg.wandb_tags),
+            config=asdict(self.cfg),
+            dir=str(self.output_dir),
+        )
+
+    @staticmethod
+    def _sanitize_metrics(metrics: dict[str, Any]) -> dict[str, float | int | str]:
+        sanitized: dict[str, float | int | str] = {}
+        for key, value in metrics.items():
+            if isinstance(value, (float, int, str)):
+                sanitized[key] = value
+            elif isinstance(value, np.generic):
+                sanitized[key] = value.item()
+        return sanitized
+
+    @staticmethod
+    def _metric_namespace(metrics: dict[str, Any]) -> str:
+        phase = str(metrics.get("phase", "train"))
+        if "eval_episodes" in metrics:
+            return f"eval/{phase}"
+        if "saved_episodes" in metrics:
+            return f"collect/{phase}"
+        return phase
+
+    def _log_metrics(self, metrics: dict[str, Any], *, commit: bool = True) -> None:
+        metrics = self._sanitize_metrics(metrics)
+        if not metrics:
+            return
+        if self.cfg.use_wandb and self.wandb_run is not None:
+            namespace = self._metric_namespace(metrics)
+            payload: dict[str, float | int | str] = {}
+            for key, value in metrics.items():
+                if key in {"phase", "step", "iteration"}:
+                    payload[key] = value
+                else:
+                    payload[f"{namespace}/{key}"] = value
+            self.wandb_run.log(payload, step=self.step, commit=commit)
+
+    def _record_metrics(self, metrics: dict[str, Any], *, commit: bool = True) -> dict[str, Any]:
+        self._log_metrics(metrics, commit=commit)
+        return metrics
 
     def _restore_default_torch_device(self) -> None:
         if hasattr(torch, "set_default_device"):
@@ -426,7 +483,10 @@ class SimRL100Trainer:
     def _train_transition_model(self) -> list[dict[str, float]]:
         inputs, targets = self._build_transition_feature_dataset()
         if inputs.shape[0] == 0:
-            return [{"phase": "transition", "step": float(self.step), "transition_skipped": 1.0}]
+            logs = [{"phase": "transition", "step": float(self.step), "transition_skipped": 1.0}]
+            for item in logs:
+                self._log_metrics(item)
+            return logs
         metrics = self.transition_model.train_on_feature_arrays(
             inputs=inputs,
             targets=targets,
@@ -436,7 +496,7 @@ class SimRL100Trainer:
             holdout_ratio=self.cfg.transition_holdout_ratio,
             logvar_loss_coef=self.cfg.transition_logvar_loss_coef,
         )
-        return [
+        logs = [
             {
                 "phase": "transition",
                 "step": float(self.step),
@@ -445,6 +505,9 @@ class SimRL100Trainer:
                 "transition_num_elites": float(len(metrics.get("elites", []))),
             }
         ]
+        for item in logs:
+            self._log_metrics(item)
+        return logs
 
     def _train_bc_steps(self, steps: int, phase: str) -> list[dict[str, float]]:
         if steps <= 0:
@@ -478,6 +541,7 @@ class SimRL100Trainer:
                     "grad_norm": float(grad_norm),
                 }
                 logs.append(metrics)
+                self._log_metrics(metrics)
                 print(
                     f"[{phase}] step={self.step} local_step={local_step + 1}/{steps} "
                     f"loss={loss.item():.4f} grad_norm={float(grad_norm):.4f}"
@@ -543,6 +607,7 @@ class SimRL100Trainer:
                 metrics.update(v_info)
                 metrics.update(q_info)
                 logs.append(metrics)
+                self._log_metrics(metrics)
                 print(
                     f"[offline_critic] step={self.step} local_step={local_step + 1}/{steps} "
                     f"v_loss={v_loss.item():.4f} q_loss={q_loss.item():.4f}"
@@ -645,6 +710,7 @@ class SimRL100Trainer:
                 }
                 metrics.update(last_info)
                 logs.append(metrics)
+                self._log_metrics(metrics)
                 print(
                     f"[{phase}] step={self.step} local_step={local_step + 1}/{steps} "
                     f"ppo_loss={ppo_loss_value:.4f} kl={last_info.get('approx_kl', 0.0):.4f} "
@@ -673,6 +739,7 @@ class SimRL100Trainer:
                     "ope_accepted": float(int(accepted)),
                 }
             )
+            self._log_metrics(logs[-1])
             if not accepted:
                 if policy_snapshot is not None:
                     self.policy.load_state_dict(policy_snapshot)
@@ -866,6 +933,7 @@ class SimRL100Trainer:
             "success_count": success_count,
             "success_rate": success_count / max(1, episodes),
         }
+        self._log_metrics(summary)
         return RolloutDatasetSpec(root=Path(dataset.root), success_episodes=success_episodes), summary, episode_infos
 
     def _evaluate(self, episodes: int, phase: str, iteration: int) -> dict[str, Any]:
@@ -911,6 +979,7 @@ class SimRL100Trainer:
             f"[eval:{phase}] iteration={iteration} avg_reward={metrics['avg_reward']:.3f} "
             f"success_rate={metrics['success_rate']:.3f}"
         )
+        self._log_metrics(metrics)
         return metrics
 
     def _online_value_regression(self, decision_buffer: list[dict[str, Any]], steps: int) -> list[dict[str, float]]:
@@ -944,6 +1013,7 @@ class SimRL100Trainer:
             self.critics.soft_update_target(self.cfg.target_update_tau)
             if local_step % 50 == 0 or local_step == steps - 1:
                 logs.append({"phase": "online_value", "step": float(self.step), "value_loss": float(value_loss.item())})
+                self._log_metrics(logs[-1])
                 print(f"[online_value] step={self.step} local_step={local_step + 1}/{steps} value_loss={value_loss.item():.4f}")
             self.step += 1
         return logs
@@ -1068,6 +1138,7 @@ class SimRL100Trainer:
                 }
                 metrics.update(ppo_info)
                 logs.append(metrics)
+                self._log_metrics(metrics)
                 print(
                     f"[online_ppo] step={self.step} local_step={local_step + 1}/{steps} "
                     f"ppo_loss={ppo_loss.item():.4f} kl={ppo_info.get('approx_kl', 0.0):.4f}"
@@ -1105,52 +1176,61 @@ class SimRL100Trainer:
         np.random.seed(self.cfg.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.cfg.seed)
+        self._init_wandb()
 
-        self.history.extend(self._train_bc_steps(self.cfg.il_steps, phase="il"))
-        self.history.append(self._evaluate(self.cfg.eval_episodes, phase="il", iteration=0))
-        self._save_checkpoint("il")
+        try:
+            self.history.extend(self._train_bc_steps(self.cfg.il_steps, phase="il"))
+            self.history.append(self._evaluate(self.cfg.eval_episodes, phase="il", iteration=0))
+            self._save_checkpoint("il")
 
-        for iteration in range(1, self.cfg.offline_iterations + 1):
-            self.history.extend(self._train_transition_model())
-            self.history.extend(self._train_iql_critics(self.cfg.critic_steps))
-            self.history.extend(self._offline_policy_optimization(self.cfg.offline_finetune_steps, phase=f"offline_ppo_{iteration}"))
-            rollout_spec, collect_summary, _ = self._collect_rollouts(
-                episodes=self.cfg.offline_collection_episodes,
-                phase="offline",
-                iteration=iteration,
-                record_decisions=False,
-                mode=self.cfg.rollout_policy_mode,
-            )
-            self.history.append(collect_summary)
-            self.rl_roots.append(rollout_spec.root)
-            self.il_specs.append(rollout_spec)
-            self.history.extend(self._train_bc_steps(self.cfg.il_retrain_steps, phase=f"offline_retrain_{iteration}"))
-            self.history.append(self._evaluate(self.cfg.eval_episodes, phase="offline", iteration=iteration))
-            if iteration % self.cfg.save_every == 0:
-                self._save_checkpoint(f"offline_{iteration:03d}")
+            for iteration in range(1, self.cfg.offline_iterations + 1):
+                self.history.extend(self._train_transition_model())
+                self.history.extend(self._train_iql_critics(self.cfg.critic_steps))
+                self.history.extend(self._offline_policy_optimization(self.cfg.offline_finetune_steps, phase=f"offline_ppo_{iteration}"))
+                rollout_spec, collect_summary, _ = self._collect_rollouts(
+                    episodes=self.cfg.offline_collection_episodes,
+                    phase="offline",
+                    iteration=iteration,
+                    record_decisions=False,
+                    mode=self.cfg.rollout_policy_mode,
+                )
+                self.history.append(collect_summary)
+                self.rl_roots.append(rollout_spec.root)
+                self.il_specs.append(rollout_spec)
+                self.history.extend(self._train_bc_steps(self.cfg.il_retrain_steps, phase=f"offline_retrain_{iteration}"))
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="offline", iteration=iteration))
+                if iteration % self.cfg.save_every == 0:
+                    self._save_checkpoint(f"offline_{iteration:03d}")
 
-        for iteration in range(1, self.cfg.online_iterations + 1):
-            rollout_spec, collect_summary, episode_infos = self._collect_rollouts(
-                episodes=self.cfg.online_collection_episodes,
-                phase="online",
-                iteration=iteration,
-                record_decisions=True,
-                mode=self.cfg.online_record_policy_mode,
-            )
-            self.history.append(collect_summary)
-            self.rl_roots.append(rollout_spec.root)
-            self.il_specs.append(rollout_spec)
-            decision_buffer = self._prepare_online_buffer(episode_infos)
-            self.history.extend(self._online_value_regression(decision_buffer, self.cfg.online_value_steps))
-            self.history.extend(self._online_policy_optimization(decision_buffer, self.cfg.online_finetune_steps))
-            self.history.append(self._evaluate(self.cfg.eval_episodes, phase="online", iteration=iteration))
-            if iteration % self.cfg.save_every == 0:
-                self._save_checkpoint(f"online_{iteration:03d}")
-
-        self._save_checkpoint("last")
-        history_path = self.output_dir / "history.json"
-        with open(history_path, "w") as f:
-            json.dump(self.history, f, indent=2)
+            for iteration in range(1, self.cfg.online_iterations + 1):
+                rollout_spec, collect_summary, episode_infos = self._collect_rollouts(
+                    episodes=self.cfg.online_collection_episodes,
+                    phase="online",
+                    iteration=iteration,
+                    record_decisions=True,
+                    mode=self.cfg.online_record_policy_mode,
+                )
+                self.history.append(collect_summary)
+                self.rl_roots.append(rollout_spec.root)
+                self.il_specs.append(rollout_spec)
+                decision_buffer = self._prepare_online_buffer(episode_infos)
+                self.history.extend(self._online_value_regression(decision_buffer, self.cfg.online_value_steps))
+                self.history.extend(self._online_policy_optimization(decision_buffer, self.cfg.online_finetune_steps))
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="online", iteration=iteration))
+                if iteration % self.cfg.save_every == 0:
+                    self._save_checkpoint(f"online_{iteration:03d}")
+        finally:
+            self._save_checkpoint("last")
+            history_path = self.output_dir / "history.json"
+            with open(history_path, "w") as f:
+                json.dump(self.history, f, indent=2)
+            if self.cfg.use_wandb and self.wandb_run is not None:
+                if self.history:
+                    final_metrics = self._sanitize_metrics(self.history[-1])
+                    for key, value in final_metrics.items():
+                        if key not in {"phase", "step", "iteration"}:
+                            self.wandb_run.summary[f"final/{key}"] = value
+                self.wandb_run.finish()
 
 
 def default_output_dir(dataset_root: str | Path) -> Path:

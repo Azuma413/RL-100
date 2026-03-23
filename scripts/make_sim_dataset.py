@@ -1,15 +1,7 @@
 import numpy as np
 import os
-import sys
 import traceback
-from pathlib import Path
-
 from PIL import Image
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "lerobot" / "src"))
-
 from rl_100.env.genesis_env import GenesisEnv
 from rl_100.lerobot_dataset_utils import append_episode_summary, build_frame, create_lerobot_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset

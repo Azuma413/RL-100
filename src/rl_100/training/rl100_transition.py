@@ -1,12 +1,9 @@
 from __future__ import annotations
-
 from typing import Any
-
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-
 
 class EnsembleLinear(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, num_ensemble: int, weight_decay: float = 0.0):

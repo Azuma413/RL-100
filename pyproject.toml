@@ -13,6 +13,7 @@ dependencies = [
     "lerobot",
     "torch",
     "torchvision",
+    "wandb",
 ]
 
 [tool.hatch.build.targets.wheel]

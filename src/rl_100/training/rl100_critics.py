@@ -1,11 +1,8 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-
 
 class MLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dims: tuple[int, ...], output_dim: int = 1):

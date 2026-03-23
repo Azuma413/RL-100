@@ -1,14 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import replace
-
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionConditionalUnet1d
 from rl_100.training.rl100_policy import RL100DiffusionConfig, RL100DiffusionPolicy
-
 
 class ConsistencyModel(nn.Module):
     def __init__(self, config: RL100DiffusionConfig, global_cond_dim: int):

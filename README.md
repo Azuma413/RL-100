@@ -107,6 +107,32 @@ uv run scripts/train_rl100_sim.py \
 - `--ope-*`: AM-Q gate 設定
 - `--max-episode-steps`: smoke 向けに eval / rollout episode 長を短くする
 - `--disable-sparse-relabel`: expert demo relabel を無効化
+- `--wandb --wandb-project <name>`: wandb logging を有効化
+
+## Success Criteria
+学習成功の一次指標は `eval/<phase>/success_rate` です。
+
+- `eval/il/success_rate`: IL 初期方策の到達点
+- `eval/offline/success_rate`: offline RL 後に本当に改善したか
+- `eval/online/success_rate`: online RL を回した場合の最終指標
+
+補助的に見るべき指標:
+
+- `collect/offline/success_rate`, `collect/online/success_rate`: rollout で成功軌跡をどれだけ集められているか
+- `transition/transition_val_loss`: transition model が feature-space dynamics を学べているか
+- `offline_critic/q_loss`, `offline_critic/v_loss`: critic 学習が壊れていないか
+- `offline_ppo_*/ppo_loss`, `offline_ppo_*/approx_kl`, `offline_ppo_*/clip_frac`: PPO 更新の安定性
+- `offline_ppo_*_ope/ope_accepted`: OPE gate が update を受理したか
+- `offline_ppo_*/cd_loss`, `online_ppo/cd_loss`: consistency distillation の追従状況
+
+wandb では phase ごとに namespaced に記録されます。例えば:
+
+- `eval/offline/success_rate`
+- `collect/offline/success_rate`
+- `transition/transition_val_loss`
+- `offline_critic/q_loss`
+- `offline_ppo_1/ppo_loss`
+- `offline_ppo_1_ope/ope_accepted`
 
 ## Fidelity
 original RL-100 に対して忠実に再現した点:
@@ -176,7 +202,9 @@ GPU smoke 実行例:
   --transition-train-patience 1 \
   --transition-max-batches 1 \
   --ope-num-batches 1 \
-  --ope-rollout-horizon 2
+  --ope-rollout-horizon 2 \
+  --wandb \
+  --wandb-project rl100-lerobot
 ```
 
 ## Conclusion

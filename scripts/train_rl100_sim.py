@@ -1,13 +1,5 @@
 import argparse
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "lerobot" / "src"))
-
 from rl_100.training.sim_rl100 import SimRL100Trainer, make_default_config
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a LeRobot Diffusion Policy with an RL-100 style sim loop.")
@@ -75,6 +67,10 @@ def parse_args():
     parser.add_argument("--ope-delta-abs-min", type=float, default=0.0)
     parser.add_argument("--ope-seed", type=int, default=42)
     parser.add_argument("--disable-ope-common-random-numbers", action="store_true")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb-project", type=str, default="rl100-lerobot")
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument("--wandb-run-name", type=str, default=None)
     return parser.parse_args()
 
 
@@ -143,6 +139,10 @@ def main():
     cfg.ope_delta_abs_min = args.ope_delta_abs_min
     cfg.ope_seed = args.ope_seed
     cfg.ope_use_common_random_numbers = not args.disable_ope_common_random_numbers
+    cfg.use_wandb = args.wandb
+    cfg.wandb_project = args.wandb_project
+    cfg.wandb_entity = args.wandb_entity
+    cfg.wandb_run_name = args.wandb_run_name
 
     trainer = SimRL100Trainer(cfg)
     trainer.run()
