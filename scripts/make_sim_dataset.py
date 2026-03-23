@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "lerobot" / "src"))
 
 from rl_100.env.genesis_env import GenesisEnv
-from rl_100.lerobot_dataset_utils import build_frame, create_lerobot_dataset
+from rl_100.lerobot_dataset_utils import append_episode_summary, build_frame, create_lerobot_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 saved_cube_pos = None
@@ -167,9 +167,19 @@ def main(task, stage_dict, observation_height=480, observation_width=640, episod
                         reward=reward_history[i],
                         done=done_history[i] if i < len(done_history) else is_last,
                         success=success_history[i] if i < len(success_history) else is_last and save_flag,
+                        episode_success=save_flag,
                     )
                 )
             dataset.save_episode()
+            append_episode_summary(
+                dataset_root=dataset.root,
+                episode_index=dataset.meta.total_episodes - 1,
+                success=save_flag,
+                episode_return=float(sum(reward_history)),
+                episode_length=len(obs_dict["action"]),
+                task=env.get_task_description(),
+                metadata=env.get_episode_metadata(),
+            )
         except Exception as e:
             print(f"⚠️ Error occurred during episode {ep+1}: {e}")
             traceback.print_exc()

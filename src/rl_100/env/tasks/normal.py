@@ -30,6 +30,7 @@ class NormalTask:
         self.observation_width = observation_width
         self._random = np.random.RandomState()
         self.box_scale = 1.0
+        self.color = "red"
         self._build_scene(show_viewer)
         self.observation_space = self._make_obs_space()
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(AGENT_DIM,), dtype=np.float32)
@@ -199,10 +200,15 @@ class NormalTask:
         self.franka.control_dofs_position(action_tensor[7:], self.fingers_dof)
         self.scene.step()
         reward = self.compute_reward()
+        success = bool(reward == 1.0)
         obs = self.get_obs()
-        terminated = True if reward == 1.0 else False
+        terminated = success
         truncated = False
-        info = {}
+        info = {
+            "is_success": success,
+            "target_cube": self.get_target_cube_name(),
+            "episode_success": success,
+        }
         return obs, reward, terminated, truncated, info
 
     def compute_reward(self, target=None, target_box=None, custom_pos=None):
@@ -283,6 +289,21 @@ class NormalTask:
     
     def get_task_description(self):
         return f"Pick up a {self.color} cube and place it in a box."
+
+    def get_target_cube_name(self) -> str:
+        color_to_cube = {
+            "red": "cubeR",
+            "green": "cubeG",
+            "blue": "cubeB",
+        }
+        return color_to_cube[self.color]
+
+    def get_episode_metadata(self) -> dict[str, object]:
+        return {
+            "target_cube": self.get_target_cube_name(),
+            "target_color": self.color,
+            "task_description": self.get_task_description(),
+        }
 
 if __name__ == "__main__":
     gs.init(backend=gs.gpu, precision="32")

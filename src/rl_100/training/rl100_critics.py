@@ -122,6 +122,9 @@ class IQLCritics(nn.Module):
     def compute_advantage(self, obs: Tensor, action: Tensor) -> Tensor:
         return self.q(obs, action) - self.value(obs)
 
+    def get_q_value(self, obs: Tensor, action: Tensor) -> Tensor:
+        return self.q(obs, action)
+
     def soft_update_target(self, tau: float) -> None:
         for param, target_param in zip(self.value.parameters(), self.target_value.parameters(), strict=True):
             target_param.data.lerp_(param.data, tau)

@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--save-every", type=int, default=1)
     parser.add_argument("--observation-height", type=int, default=224)
     parser.add_argument("--observation-width", type=int, default=224)
+    parser.add_argument("--max-episode-steps", type=int, default=700)
     parser.add_argument("--show-viewer", action="store_true")
     parser.add_argument("--keep-failures", action="store_true")
     parser.add_argument("--horizon", type=int, default=16)
@@ -53,6 +54,27 @@ def parse_args():
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--hf-cache-root", type=str, default="/tmp/rl100_hf_cache")
     parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--disable-sparse-relabel", action="store_true")
+    parser.add_argument("--assume-expert-failure", action="store_true")
+    parser.add_argument("--lambda-cd", type=float, default=1.0)
+    parser.add_argument("--cd-every", type=int, default=1)
+    parser.add_argument("--rollout-policy-mode", type=str, default="ddim", choices=["ddim", "cm"])
+    parser.add_argument("--eval-policy-mode", type=str, default="ddim", choices=["ddim", "cm"])
+    parser.add_argument("--online-record-policy-mode", type=str, default="ddim", choices=["ddim", "cm"])
+    parser.add_argument("--transition-train-epochs", type=int, default=50)
+    parser.add_argument("--transition-train-patience", type=int, default=5)
+    parser.add_argument("--transition-holdout-ratio", type=float, default=0.2)
+    parser.add_argument("--transition-logvar-loss-coef", type=float, default=0.01)
+    parser.add_argument("--transition-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--transition-max-batches", type=int, default=0)
+    parser.add_argument("--stochastic-transition-eval", action="store_true")
+    parser.add_argument("--disable-ope", action="store_true")
+    parser.add_argument("--ope-num-batches", type=int, default=8)
+    parser.add_argument("--ope-rollout-horizon", type=int, default=5)
+    parser.add_argument("--ope-delta-coef", type=float, default=0.05)
+    parser.add_argument("--ope-delta-abs-min", type=float, default=0.0)
+    parser.add_argument("--ope-seed", type=int, default=42)
+    parser.add_argument("--disable-ope-common-random-numbers", action="store_true")
     return parser.parse_args()
 
 
@@ -82,6 +104,7 @@ def main():
     cfg.save_every = args.save_every
     cfg.observation_height = args.observation_height
     cfg.observation_width = args.observation_width
+    cfg.max_episode_steps = args.max_episode_steps
     cfg.show_viewer = args.show_viewer
     cfg.merge_success_only = not args.keep_failures
     cfg.horizon = args.horizon
@@ -99,6 +122,27 @@ def main():
     cfg.max_grad_norm = args.max_grad_norm
     cfg.hf_cache_root = args.hf_cache_root
     cfg.amp = args.amp
+    cfg.relabel_sparse_reward = not args.disable_sparse_relabel
+    cfg.assume_expert_success = not args.assume_expert_failure
+    cfg.lambda_cd = args.lambda_cd
+    cfg.cd_every = args.cd_every
+    cfg.rollout_policy_mode = args.rollout_policy_mode
+    cfg.eval_policy_mode = args.eval_policy_mode
+    cfg.online_record_policy_mode = args.online_record_policy_mode
+    cfg.transition_train_epochs = args.transition_train_epochs
+    cfg.transition_train_patience = args.transition_train_patience
+    cfg.transition_holdout_ratio = args.transition_holdout_ratio
+    cfg.transition_logvar_loss_coef = args.transition_logvar_loss_coef
+    cfg.transition_learning_rate = args.transition_learning_rate
+    cfg.transition_max_batches = args.transition_max_batches
+    cfg.transition_deterministic_eval = not args.stochastic_transition_eval
+    cfg.ope_enabled = not args.disable_ope
+    cfg.ope_num_batches = args.ope_num_batches
+    cfg.ope_rollout_horizon = args.ope_rollout_horizon
+    cfg.ope_delta_coef = args.ope_delta_coef
+    cfg.ope_delta_abs_min = args.ope_delta_abs_min
+    cfg.ope_seed = args.ope_seed
+    cfg.ope_use_common_random_numbers = not args.disable_ope_common_random_numbers
 
     trainer = SimRL100Trainer(cfg)
     trainer.run()

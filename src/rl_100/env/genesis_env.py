@@ -12,6 +12,7 @@ class GenesisEnv(gym.Env):
             show_viewer=False,
             render_mode=None,
             reset_freq=10,
+            max_episode_steps=700,
     ):
         super().__init__()
         self.task = task
@@ -22,10 +23,11 @@ class GenesisEnv(gym.Env):
         self._env = self._make_env_task()
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
-        self._max_episode_steps = 700
+        self._max_episode_steps = max_episode_steps
         self.step_count = 0
         self.reset_freq = reset_freq
         self.episode_count = 0
+        self.episode_success = False
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -42,16 +44,22 @@ class GenesisEnv(gym.Env):
             self._env.seed(seed)
         # resetは obs, info を返す
         self.step_count = 0
+        self.episode_success = False
         observation, info = self._env.reset()
         # infoに is_success を追加 (初期値はFalse)
         info["is_success"] = False
+        info["episode_success"] = False
+        if hasattr(self._env, "get_episode_metadata"):
+            info.update(self._env.get_episode_metadata())
         return observation, info
 
     def step(self, action):
         # stepは obs, reward, terminated, truncated, info を返す
         observation, reward, terminated, truncated, info = self._env.step(action)
-        is_success = (reward == 1.0)
+        is_success = bool(info.get("is_success", reward == 1.0))
+        self.episode_success = self.episode_success or is_success
         info["is_success"] = is_success
+        info["episode_success"] = self.episode_success
         self.step_count += 1
         if self.step_count >= self._max_episode_steps:
             terminated = True
@@ -79,6 +87,12 @@ class GenesisEnv(gym.Env):
 
     def get_task_description(self):
         return self._env.get_task_description()
+
+    def get_episode_metadata(self):
+        metadata = {"task": self.task, "episode_success": self.episode_success}
+        if hasattr(self._env, "get_episode_metadata"):
+            metadata.update(self._env.get_episode_metadata())
+        return metadata
 
     def _make_env_task(self):
         if "normal" in self.task:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
 import numpy as np
@@ -8,6 +9,10 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import DONE, REWARD
 from rl_100.env.tasks.normal import AGENT_DIM, joints_name
+
+NEXT_SUCCESS = "next.success"
+EPISODE_SUCCESS = "episode.success"
+EPISODE_SUMMARY_PATH = Path("meta") / "rl100_episode_summaries.jsonl"
 
 STATE_NAMES = [
     "eef_pos_x",
@@ -44,7 +49,8 @@ def make_lerobot_features(
     if include_rl_labels:
         features[REWARD] = {"dtype": "float32", "shape": (1,), "names": None}
         features[DONE] = {"dtype": "bool", "shape": (1,), "names": None}
-        features["next.success"] = {"dtype": "bool", "shape": (1,), "names": None}
+        features[NEXT_SUCCESS] = {"dtype": "bool", "shape": (1,), "names": None}
+        features[EPISODE_SUCCESS] = {"dtype": "bool", "shape": (1,), "names": None}
 
     return features
 
@@ -92,6 +98,7 @@ def build_frame(
     reward: float | None = None,
     done: bool | None = None,
     success: bool | None = None,
+    episode_success: bool | None = None,
 ) -> dict[str, Any]:
     frame = convert_env_obs_to_lerobot_frame(numpy_observation)
     frame["action"] = np.asarray(action, dtype=np.float32)
@@ -101,5 +108,49 @@ def build_frame(
     if done is not None:
         frame[DONE] = np.asarray([done], dtype=bool)
     if success is not None:
-        frame["next.success"] = np.asarray([success], dtype=bool)
+        frame[NEXT_SUCCESS] = np.asarray([success], dtype=bool)
+    if episode_success is not None:
+        frame[EPISODE_SUCCESS] = np.asarray([episode_success], dtype=bool)
     return frame
+
+
+def append_episode_summary(
+    dataset_root: str | Path,
+    episode_index: int,
+    success: bool,
+    episode_return: float,
+    episode_length: int,
+    task: str,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    dataset_root = Path(dataset_root)
+    summary_path = dataset_root / EPISODE_SUMMARY_PATH
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "episode_index": int(episode_index),
+        "success": bool(success),
+        "episode_return": float(episode_return),
+        "episode_length": int(episode_length),
+        "task": task,
+    }
+    if metadata:
+        payload.update(metadata)
+    with summary_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    return summary_path
+
+
+def load_episode_summaries(dataset_root: str | Path) -> dict[int, dict[str, Any]]:
+    dataset_root = Path(dataset_root)
+    summary_path = dataset_root / EPISODE_SUMMARY_PATH
+    if not summary_path.exists():
+        return {}
+    summaries: dict[int, dict[str, Any]] = {}
+    with summary_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            summaries[int(payload["episode_index"])] = payload
+    return summaries

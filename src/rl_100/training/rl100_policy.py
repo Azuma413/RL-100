@@ -44,6 +44,8 @@ class RL100DiffusionPolicy(DiffusionPolicy):
     def _stack_visual_inputs(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         if not self.config.image_features:
             return batch
+        if OBS_IMAGES in batch:
+            return batch
         batch = dict(batch)
         batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
         return batch
@@ -59,6 +61,10 @@ class RL100DiffusionPolicy(DiffusionPolicy):
 
     def flatten_chunk_action(self, horizon_actions: Tensor) -> Tensor:
         return self.get_chunk_from_horizon(horizon_actions).reshape(horizon_actions.shape[0], -1)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.parameters()).dtype
 
     def get_variance_at_timestep(self, timestep: Tensor, prev_timestep: Tensor) -> Tensor:
         scheduler = self.diffusion.noise_scheduler
@@ -145,6 +151,24 @@ class RL100DiffusionPolicy(DiffusionPolicy):
             log_probs.append(log_prob)
         return sample, trajectory, log_probs
 
+    @torch.no_grad()
+    def predict_horizon_actions_from_global_cond(
+        self,
+        global_cond: Tensor,
+        noise: Tensor | None = None,
+    ) -> Tensor:
+        horizon_actions, _, _ = self.sample_trajectory(global_cond, noise=noise)
+        return horizon_actions
+
+    @torch.no_grad()
+    def predict_action_chunk_from_global_cond(
+        self,
+        global_cond: Tensor,
+        noise: Tensor | None = None,
+    ) -> Tensor:
+        horizon_actions = self.predict_horizon_actions_from_global_cond(global_cond, noise=noise)
+        return self.get_chunk_from_horizon(horizon_actions)
+
     def compute_ppo_loss(
         self,
         old_log_probs: list[Tensor],
@@ -163,6 +187,8 @@ class RL100DiffusionPolicy(DiffusionPolicy):
         approx_kls: list[float] = []
         clip_fracs: list[float] = []
         ratio_devs: list[float] = []
+        min_ratios: list[float] = []
+        max_ratios: list[float] = []
 
         for i, timestep in enumerate(scheduler.timesteps):
             if i + 1 >= len(trajectory):
@@ -193,6 +219,8 @@ class RL100DiffusionPolicy(DiffusionPolicy):
             approx_kls.append(float(approx_kl.item()))
             clip_fracs.append(float(clip_frac.item()))
             ratio_devs.append(float((ratio - 1.0).abs().mean().item()))
+            min_ratios.append(float(ratio.min().item()))
+            max_ratios.append(float(ratio.max().item()))
 
         if not ppo_losses:
             zero = global_cond.new_zeros(())
@@ -202,6 +230,8 @@ class RL100DiffusionPolicy(DiffusionPolicy):
                 "clip_frac": 0.0,
                 "mean_ratio": 1.0,
                 "mean_abs_ratio_dev": 0.0,
+                "min_ratio": 1.0,
+                "max_ratio": 1.0,
             }
         total_loss = torch.stack(ppo_losses).mean()
         return total_loss, {
@@ -210,6 +240,8 @@ class RL100DiffusionPolicy(DiffusionPolicy):
             "clip_frac": float(sum(clip_fracs) / len(clip_fracs)),
             "mean_ratio": float(sum(ratios) / len(ratios)),
             "mean_abs_ratio_dev": float(sum(ratio_devs) / len(ratio_devs)),
+            "min_ratio": float(sum(min_ratios) / len(min_ratios)),
+            "max_ratio": float(sum(max_ratios) / len(max_ratios)),
         }
 
     @torch.no_grad()
