@@ -1,13 +1,13 @@
 # RL-100 on 3D-Diffusion-Policy
 
-本仓库是在 [3D Diffusion Policy (DP3)](https://3d-diffusion-policy.github.io) 基础上实现并整理的 **RL-100** 版本，包含：
+本リポジトリは、[3D Diffusion Policy (DP3)](https://3d-diffusion-policy.github.io) をベースに実装・整理された **RL-100** バージョンであり、以下を含みます：
 
-- DP3 行为克隆训练与评测
-- RL-100 的 `IL -> Offline RL -> Online RL` 三阶段训练
-- MetaWorld / Adroit / DexArt 演示数据采集脚本
-- DDIM 主策略与 Consistency Model 的评测入口
+- DP3 行動クローニングの学習と評価
+- RL-100 の IL -> Offline RL -> Online RL の3段階学習
+- MetaWorld / Adroit / DexArt デモデータ収集スクリプト
+- DDIM メインポリシーと Consistency Model の評価エントリ
 
-论文：
+論文：
 
 - DP3: <https://arxiv.org/abs/2403.03954>
 - RL-100: <https://arxiv.org/abs/2510.14830>
@@ -16,32 +16,32 @@
   <img src="rl100.png" alt="RL-100 framework" width="100%">
 </div>
 
-## 仓库结构
+## リポジトリ構成
 
-核心代码位于 [3D-Diffusion-Policy](/home/yrz/RL-100/3D-Diffusion-Policy)：
+コアコードは [3D-Diffusion-Policy](/home/yrz/RL-100/3D-Diffusion-Policy) にあります：
 
-- [train_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/train_rl100.py)：RL-100 训练入口
-- [eval_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/eval_rl100.py)：RL-100 单 checkpoint 评测入口
-- [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml)：RL-100 主配置
-- [config/task](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/task)：各任务配置
-- [scripts](/home/yrz/RL-100/scripts)：数据采集、DP3 训练与评测脚本
+- [train_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/train_rl100.py)：RL-100 学習エントリ
+- [eval_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/eval_rl100.py)：RL-100 単一チェックポイント評価エントリ
+- [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml)：RL-100 メイン設定
+- [config/task](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/task)：各タスク設定
+- [scripts](/home/yrz/RL-100/scripts)：データ収集、DP3 学習および評価スクリプト
 
-## 环境安装
+## 環境構築
 
-环境配置 **直接沿用 DP3**，这里没有额外改动。
+環境設定は **DP3 を直接流用** しており、追加の変更はありません。
 
-- 安装说明见 [INSTALL.md](/home/yrz/RL-100/INSTALL.md)
-- 常见报错见 [ERROR_CATCH.md](/home/yrz/RL-100/ERROR_CATCH.md)
+- インストール手順は [INSTALL.md](/home/yrz/RL-100/INSTALL.md) を参照してください。
+- よくあるエラーについては [ERROR_CATCH.md](/home/yrz/RL-100/ERROR_CATCH.md) を参照してください。
 
-如果你已经能正常跑 DP3，就可以直接跑 RL-100。
+すでに DP3 を正常に実行できている場合は、そのまま RL-100 を実行できます。
 
-## 数据采集
+## データ収集
 
-所有演示数据默认写入 [3D-Diffusion-Policy/data](/home/yrz/RL-100/3D-Diffusion-Policy/data)。
+すべてのデモデータはデフォルトで [3D-Diffusion-Policy/data](/home/yrz/RL-100/3D-Diffusion-Policy/data) に書き込まれます。
 
 ### MetaWorld
 
-脚本： [gen_demonstration_metaworld.sh](/home/yrz/RL-100/scripts/gen_demonstration_metaworld.sh)
+スクリプト： [gen_demonstration_metaworld.sh](/home/yrz/RL-100/scripts/gen_demonstration_metaworld.sh)
 
 ```bash
 bash scripts/gen_demonstration_metaworld.sh dial-turn
@@ -49,15 +49,15 @@ bash scripts/gen_demonstration_metaworld.sh basketball sparse
 bash scripts/gen_demonstration_metaworld.sh push dense
 ```
 
-说明：
+説明：
 
-- 第一个参数是 MetaWorld 任务名
-- 第二个参数是奖励类型，默认 `sparse`
-- 当前脚本固定采集 `100` 个 episode
+- 最初の引数は MetaWorld のタスク名です。
+- 2番目の引数は報酬タイプで、デフォルトは `sparse` です。
+- 現在のスクリプトでは固定で 100 エピソードを収集します。
 
 ### Adroit
 
-脚本： [gen_demonstration_adroit.sh](/home/yrz/RL-100/scripts/gen_demonstration_adroit.sh)
+スクリプト： [gen_demonstration_adroit.sh](/home/yrz/RL-100/scripts/gen_demonstration_adroit.sh)
 
 ```bash
 bash scripts/gen_demonstration_adroit.sh door
@@ -65,14 +65,14 @@ bash scripts/gen_demonstration_adroit.sh hammer
 bash scripts/gen_demonstration_adroit.sh pen
 ```
 
-说明：
+説明：
 
-- 当前脚本固定采集 `10` 个 episode
-- 依赖 `third_party/VRL3/ckpts/` 下的 expert checkpoint
+- 現在のスクリプトでは固定で 10 エピソードを収集します。
+- `third_party/VRL3/ckpts/` 配下の expert チェックポイントに依存します。
 
 ### DexArt
 
-脚本： [gen_demonstration_dexart.sh](/home/yrz/RL-100/scripts/gen_demonstration_dexart.sh)
+スクリプト： [gen_demonstration_dexart.sh](/home/yrz/RL-100/scripts/gen_demonstration_dexart.sh)
 
 ```bash
 bash scripts/gen_demonstration_dexart.sh laptop
@@ -81,18 +81,18 @@ bash scripts/gen_demonstration_dexart.sh bucket
 bash scripts/gen_demonstration_dexart.sh toilet
 ```
 
-说明：
+説明：
 
-- 当前脚本固定采集 `100` 个 episode
-- 依赖 `third_party/dexart-release/assets/rl_checkpoints/`
+- 現在のスクリプトでは固定で 100 エピソードを収集します。
+- `third_party/dexart-release/assets/rl_checkpoints/` に依存します。
 
-## DP3 基线训练与评测
+## DP3 ベースラインの学習と評価
 
-如果你只想跑原始 DP3 行为克隆流程，可以继续用原脚本。
+オリジナルの DP3 行動クローニングフローのみを実行したい場合は、引き続き元のスクリプトを使用できます。
 
-### 训练
+### 学習
 
-脚本： [train_policy.sh](/home/yrz/RL-100/scripts/train_policy.sh)
+スクリプト： [train_policy.sh](/home/yrz/RL-100/scripts/train_policy.sh)
 
 ```bash
 bash scripts/train_policy.sh dp3 metaworld_dial-turn exp1 0 0
@@ -100,39 +100,39 @@ bash scripts/train_policy.sh dp3 adroit_hammer exp1 0 0
 bash scripts/train_policy.sh simple_dp3 dexart_laptop exp1 0 0
 ```
 
-参数顺序：
+引数の順序：
 
-1. 算法名：`dp3` 或 `simple_dp3`
-2. 任务名：例如 `metaworld_dial-turn`
-3. 附加字符串：用于组成实验名
-4. 随机种子
-5. GPU id
+1. アルゴリズム名：`dp3` または `simple_dp3`
+2. タスク名：例 `metaworld_dial-turn`
+3. 追加文字列：実験名の構成に使用されます
+4. 乱数シード
+5. GPU ID
 
-### 评测
+### 評価
 
-脚本： [eval_policy.sh](/home/yrz/RL-100/scripts/eval_policy.sh)
+スクリプト： [eval_policy.sh](/home/yrz/RL-100/scripts/eval_policy.sh)
 
 ```bash
 bash scripts/eval_policy.sh dp3 metaworld_dial-turn exp1 0 0
 ```
 
-## RL-100 训练
+## RL-100 学習
 
-RL-100 不走 shell 脚本，直接用 Hydra 入口。
+RL-100 はシェルスクリプトを使用せず、直接 Hydra エントリを使用します。
 
-先进入项目目录：
+まずプロジェクトディレクトリに移動します：
 
 ```bash
 cd 3D-Diffusion-Policy
 ```
 
-### 基本训练
+### 基本的な学習
 
 ```bash
 python train_rl100.py task=metaworld_dial-turn
 ```
 
-### 常见覆盖写法
+### よく使われるオーバーライド設定
 
 ```bash
 python train_rl100.py \
@@ -143,7 +143,7 @@ python train_rl100.py \
   task.env_runner.eval_episodes=100
 ```
 
-### 指定从某个 checkpoint 恢复
+### 特定のチェックポイントから再開する場合
 
 ```bash
 python train_rl100.py \
@@ -152,23 +152,23 @@ python train_rl100.py \
   training.resume_path=/path/to/checkpoints/after_il.ckpt
 ```
 
-### 训练阶段
+### 学習フェーズ
 
-`train_rl100.py` 默认执行以下流程：
+`train_rl100.py` はデフォルトで以下のフローを実行します：
 
-1. `IL`：先用 demonstration 训练 DP3/RL100 policy
-2. `Offline RL`：训练 transition model、IQL critics、offline PPO，并做 OPE gate
-3. `Data Collection + IL Retrain`：收集新轨迹并并回数据集，再做 IL retrain
-4. `Online RL`：对 fresh rollout 做 on-policy PPO + GAE
-5. `Final Eval`：按配置评测 `ddim` 和/或 `cm`
+1. IL：デモンストレーションを使用して DP3/RL100 ポリシーを事前に学習します。
+2. Offline RL：遷移モデル、IQL critics、offline PPO を学習し、OPE gate を実行します。
+3. Data Collection + IL Retrain：新しい軌跡を収集してデータセットに統合し、IL retrain を実行します。
+4. Online RL：新しいロールアウトに対して on-policy PPO + GAE を実行します。
+5. Final Eval：設定に従って ddim および/または cm を評価します。
 
-相关主配置见 [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml)。
+関連するメイン設定は [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml) を参照してください。
 
-## RL-100 评测
+## RL-100 評価
 
-脚本入口： [eval_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/eval_rl100.py)
+スクリプトエントリ： [eval_rl100.py](/home/yrz/RL-100/3D-Diffusion-Policy/eval_rl100.py)
 
-### 评测主模型 DDIM
+### メインモデル DDIM の評価
 
 ```bash
 python eval_rl100.py \
@@ -179,7 +179,7 @@ python eval_rl100.py \
   task.env_runner.eval_episodes=100
 ```
 
-### 评测 EMA-DDIM
+### EMA-DDIM の評価
 
 ```bash
 python eval_rl100.py \
@@ -190,7 +190,7 @@ python eval_rl100.py \
   task.env_runner.eval_episodes=100
 ```
 
-### 评测 Consistency Model
+### Consistency Model の評価
 
 ```bash
 python eval_rl100.py \
@@ -201,25 +201,25 @@ python eval_rl100.py \
   task.env_runner.eval_episodes=100
 ```
 
-## 输出内容
+## 出力内容
 
-训练输出目录由 Hydra 管理，默认在：
+学習出力ディレクトリは Hydra によって管理され、デフォルトは以下の通りです：
 
 ```bash
 3D-Diffusion-Policy/outputs/rl100_<task>_seed<seed>/<date>_<time>/
 ```
 
-其中通常包含：
+通常、以下が含まれます：
 
 - `checkpoints/after_il.ckpt`
 - `checkpoints/offline_iter_<N>.ckpt`
 - `checkpoints/online_iter_<N>.ckpt`
 - `checkpoints/final.ckpt`
-- `plots/` 下的各类 loss / success 曲线
+- `plots/` 配下の各種 loss / success 曲線
 
-## 重要配置项
+## 重要な設定項目
 
-常用项基本都在 [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml)：
+よく使われる項目は基本的に [rl100.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/rl100.yaml) にあります：
 
 - `training.num_offline_iterations`
 - `training.critic_epochs`
@@ -236,33 +236,33 @@ python eval_rl100.py \
 - `runtime.final_eval_use_ema`
 - `task.env_runner.eval_episodes`
 
-任务数据路径、观测维度、评测 episode 数在各自 task yaml 里定义，例如：
+タスクデータのパス、観測次元、評価エピソード数は各タスクの yaml で定義されています。例：
 
 - [metaworld_dial-turn.yaml](/home/yrz/RL-100/3D-Diffusion-Policy/diffusion_policy_3d/config/task/metaworld_dial-turn.yaml)
 
-## 注意事项
+## 注意事項
 
-### 1. `eval_episodes` 以 task yaml 为准
+### 1. `eval_episodes` はタスク yaml が優先されます
 
-最终训练评测和 `eval_rl100.py` 都直接读取 `task.env_runner.eval_episodes`。  
-如果要改评测轮数，改 task yaml 或在命令行覆盖：
+最終的な学習評価と `eval_rl100.py` はどちらも直接 `task.env_runner.eval_episodes` を読み込みます。  
+評価回数を変更する場合は、タスク yaml を変更するか、コマンドラインでオーバーライドしてください：
 
 ```bash
 python train_rl100.py task=metaworld_dial-turn task.env_runner.eval_episodes=100
 ```
 
-### 2. `merge_success_only` 只影响 IL retrain，不影响 RL 本身
+### 2. `merge_success_only` は IL retrain にのみ影響し、RL 自体には影響しません
 
-当前逻辑是：
+現在のロジックは以下の通りです：
 
-- offline RL / online RL 都使用完整采样轨迹，包括失败轨迹
-- `success-only` 只作用于后续 `IL retrain` 的数据筛选
+- Offline RL / Online RL はどちらも、失敗した軌跡を含む完全なサンプリング軌跡を使用します。
+- `success-only` は、その後の `IL retrain` のデータフィルタリングにのみ作用します。
 
-这和 RL 训练、IL 重训的语义已经拆开了。
+これにより、RL 学習と IL 再学習のセマンティクスが分離されています。
 
-### 3. `prediction_type` 必须是 `epsilon`
+### 3. `prediction_type` は `epsilon` である必要があります
 
-RL-100 的 PPO ratio 计算依赖 `epsilon` 参数化。当前配置已固定为：
+RL-100 の PPO ratio 計算は `epsilon` パラメータ化に依存しています。現在の設定は以下のように固定されています：
 
 ```yaml
 policy:
@@ -270,82 +270,82 @@ policy:
     prediction_type: epsilon
 ```
 
-不要改成 `sample`。
+`sample` に変更しないでください。
 
-### 4. `sigma_max` 不要无脑共用
+### 4. `sigma_max` を安易に共有しないでください
 
-根据 RL-100 论文 `2510.14830 v4` 的消融结论，stochastic DDIM 的标准差上界需要按控制模式区分：
+RL-100 論文 `2510.14830 v4` のアブレーション結果に基づき、stochastic DDIM の標準差の上限は制御モードごとに区別する必要があります：
 
 - `sigma_max = 0.8`
   - Adroit
   - Mujoco locomotion
-  - 真机单步控制任务
+  - 実機単一ステップ制御タスク
 - `sigma_max = 0.1`
   - MetaWorld
-  - 真机 chunk-action 控制任务
+  - 実機 chunk-action 制御タスク
 
-仓库当前默认：
+リポジトリの現在のデフォルト設定：
 
 ```yaml
 policy:
   sigma_max: 0.1
 ```
 
-这适合 MetaWorld / chunk-action。  
-如果你做真机单步控制，应该按论文建议改到 `0.8`。
+これは MetaWorld / chunk-action に適しています。  
+実機単一ステップ制御を行う場合は、論文の推奨に従って `0.8` に変更する必要があります。
 
-### 5. `reward_type=dense` 只能用于真的有 dense reward 标签的数据
+### 5. `reward_type=dense` は、実際に dense reward ラベルがあるデータにのみ使用してください
 
-当前 MetaWorld 演示脚本默认是：
+現在の MetaWorld デモスクリプトのデフォルトは以下の通りです：
 
 ```bash
 bash scripts/gen_demonstration_metaworld.sh <task> sparse
 ```
 
-如果你要跑 `dense`，需要保证：
+dense を実行する場合は、以下のことを確認してください：
 
-- 采集脚本真的生成了 dense reward
-- 配置里的 `critics.reward_type` 与数据一致
+- 収集スクリプトが実際に dense reward を生成していること。
+- 設定内の `critics.reward_type` がデータと一致していること。
 
-不要拿 sparse 数据去伪装 dense reward。
+sparse データを dense reward として扱わないでください。
 
-### 6. `use_recon_vib=true` 时要从头训
+### 6. `use_recon_vib=true` の場合は最初から学習する必要があります
 
-如果 checkpoint 不是用 Recon/VIB 训练出来的，不要直接在中途打开：
+チェックポイントが Recon/VIB で学習されたものでない場合は、途中で有効にしないでください：
 
 ```yaml
 policy:
   use_recon_vib: true
 ```
 
-这会把随机初始化的 decoder/VIB 分支引进来，破坏已有 policy。  
-如果要用，应该从 demonstration 开始重新训练。
+これにより、ランダムに初期化された decoder/VIB 分岐が導入され、既存のポリシーが破壊されます。  
+使用する場合は、デモンストレーションから再学習する必要があります。
 
-### 7. EMA 与主模型不是一回事
+### 7. EMA とメインモデルは別物です
 
-- 训练时真正反向更新的是主模型 `policy`
-- `ema_policy` 是主模型参数的指数滑动平均
-- 最终评测是否用 EMA，取决于：
+- 学習時に実際に誤差逆伝播で更新されるのはメインモデルの `policy` です。
+- `ema_policy` は、メインモデルのパラメータの指数移動平均です。
+- 最終的な評価で EMA を使用するかどうかは、以下に依存します：
   - `runtime.final_eval_use_ema`
   - `runtime.eval_use_ema`
 
-### 8. WandB 不是必须的
+### 8. WandB は必須ではありません
 
-如果不想用 WandB，直接在配置里关掉：
+WandB を使用したくない場合は、設定で直接無効にしてください：
 
 ```bash
 python train_rl100.py task=metaworld_dial-turn logging.use_wandb=false
 ```
 
-## 参考文档
+## 参考文献
 
-- RL-100 代码说明： [RL100_README.md](/home/yrz/RL-100/3D-Diffusion-Policy/RL100_README.md)
-- DP3 安装说明： [INSTALL.md](/home/yrz/RL-100/INSTALL.md)
-- 安装踩坑记录： [ERROR_CATCH.md](/home/yrz/RL-100/ERROR_CATCH.md)
+- RL-100 コード説明： [RL100_README.md](/home/yrz/RL-100/3D-Diffusion-Policy/RL100_README.md)
+- DP3 インストール手順： [INSTALL.md](/home/yrz/RL-100/INSTALL.md)
+- インストールのトラブルシューティング： [ERROR_CATCH.md](/home/yrz/RL-100/ERROR_CATCH.md)
 
 ## Citation
 
-如果这个仓库对你有帮助，可以引用：
+本リポジトリが役立つ場合は、以下を引用してください：
 
 ```bibtex
 @inproceedings{Ze2024DP3,

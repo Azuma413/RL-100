@@ -45,3 +45,5 @@ easytrain.sh
 nohup.out
 output/
 3D-Diffusion-Policy/data/outputs/
+
+.vscode/
