@@ -10,7 +10,20 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "genesis-world>=0.4.3",
+    "lerobot",
+    "torch",
+    "torchvision",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rl_100"]
+
+[tool.uv.sources]
+lerobot = { path = "lerobot", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

@@ -1,6 +1,5 @@
 import gymnasium as gym
 import warnings
-import re # Added import
 from rl_100.env.tasks.normal import NormalTask
 
 class GenesisEnv(gym.Env):

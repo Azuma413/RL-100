@@ -84,18 +84,18 @@ class NormalTask:
         
         if self.use_two_boxes:
             self.box_left = self.scene.add_entity(
-                gs.morphs.URDF(file="URDF/box/box.urdf", pos=(0.5, 0.15, 0.0), scale=self.box_scale),
+                gs.morphs.URDF(file="3d_model/box.urdf", pos=(0.5, 0.15, 0.0), scale=self.box_scale),
                 surface=gs.surfaces.Plastic(color=(0.8, 0.8, 0.8))
             )
             self.box_right = self.scene.add_entity(
-                gs.morphs.URDF(file="URDF/box/box.urdf", pos=(0.5, -0.15, 0.0), scale=self.box_scale),
+                gs.morphs.URDF(file="3d_model/box.urdf", pos=(0.5, -0.15, 0.0), scale=self.box_scale),
                 surface=gs.surfaces.Plastic(color=(0.8, 0.8, 0.8))
             )
             # 互換性のためにself.boxも定義しておく（デフォルトは左にしておくが、タスクによって使い分ける）
             self.box = self.box_left 
         else:
             self.box = self.scene.add_entity(
-                gs.morphs.URDF(file="URDF/box/box.urdf", pos=(0.5, 0.0, 0.0), scale=self.box_scale),
+                gs.morphs.URDF(file="3d_model/box.urdf", pos=(0.5, 0.0, 0.0), scale=self.box_scale),
                 surface=gs.surfaces.Plastic(color=(0.8, 0.8, 0.8))
             )
         self.front_cam = self.scene.add_camera(
