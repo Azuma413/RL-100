@@ -96,6 +96,8 @@ class SimRL100Config:
     wandb_entity: str | None = None
     wandb_run_name: str | None = None
     wandb_tags: tuple[str, ...] = ()
+    init_policy_path: str | None = None
+    use_separate_rgb_encoder_per_camera: bool = True
 
 
 class SimRL100Trainer:
@@ -155,6 +157,18 @@ class SimRL100Trainer:
         self.log_step = 0
         self.history: list[dict[str, Any]] = []
         self.wandb_run = None
+
+    def _make_rollout_dir(self, phase: str, iteration: int) -> Path:
+        base_dir = self.rollout_root / f"{phase}_{iteration:03d}"
+        if not base_dir.exists():
+            return base_dir
+
+        suffix = 1
+        while True:
+            candidate = self.rollout_root / f"{phase}_{iteration:03d}_run{suffix:02d}"
+            if not candidate.exists():
+                return candidate
+            suffix += 1
 
     def _init_wandb(self) -> None:
         if not self.cfg.use_wandb:
@@ -242,11 +256,19 @@ class SimRL100Trainer:
             resize_shape=None,
             noise_scheduler_type="DDIM",
             prediction_type="epsilon",
+            use_separate_rgb_encoder_per_camera=self.cfg.use_separate_rgb_encoder_per_camera,
             ppo_clip_eps=self.cfg.ppo_clip_eps,
             sigma_min=self.cfg.sigma_min,
             sigma_max=self.cfg.sigma_max,
             use_variance_clip=True,
         )
+
+    @staticmethod
+    def _resolve_pretrained_policy_dir(path: str | Path) -> Path:
+        path = Path(path).resolve()
+        if (path / "pretrained_model").is_dir():
+            return path / "pretrained_model"
+        return path
 
     def _load_il_dataset(self, dataset_root: Path, episodes: list[int] | None = None) -> LeRobotDataset:
         ds_meta = LeRobotDatasetMetadata(repo_id=dataset_root.name, root=dataset_root)
@@ -264,10 +286,26 @@ class SimRL100Trainer:
     def _make_policy_stack(self):
         ds_meta = LeRobotDatasetMetadata(repo_id=self.base_dataset_root.name, root=self.base_dataset_root)
         policy_cfg = self._make_policy_config(metadata=ds_meta)
-        policy = RL100DiffusionPolicy(policy_cfg)
-        policy.to(self.device)
-        policy.train()
-        preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy_cfg, dataset_stats=ds_meta.stats)
+        pretrained_path = None
+        if self.cfg.init_policy_path:
+            pretrained_path = self._resolve_pretrained_policy_dir(self.cfg.init_policy_path)
+            policy = RL100DiffusionPolicy.from_pretrained(
+                pretrained_path,
+                config=policy_cfg,
+                strict=False,
+            )
+            policy.to(self.device)
+            policy.train()
+            preprocessor, postprocessor = make_pre_post_processors(
+                policy_cfg=policy_cfg,
+                pretrained_path=str(pretrained_path),
+                dataset_stats=ds_meta.stats,
+            )
+        else:
+            policy = RL100DiffusionPolicy(policy_cfg)
+            policy.to(self.device)
+            policy.train()
+            preprocessor, postprocessor = make_pre_post_processors(policy_cfg=policy_cfg, dataset_stats=ds_meta.stats)
         return policy, preprocessor, postprocessor
 
     def _peek_policy_batch(self, dataset: LeRobotDataset) -> dict[str, torch.Tensor]:
@@ -350,6 +388,29 @@ class SimRL100Trainer:
                 value = torch.as_tensor(value)
             result[key] = value.to(self.device, non_blocking=True)
         return result
+
+    @staticmethod
+    def _tensor_from_arraylike(value: Any, **kwargs: Any) -> torch.Tensor:
+        if isinstance(value, np.ndarray):
+            value = np.ascontiguousarray(value)
+        return torch.as_tensor(value, **kwargs)
+
+    def _stack_decision_observations(
+        self,
+        decisions: list[dict[str, Any]],
+        obs_key: str,
+        source_key: str,
+    ) -> torch.Tensor:
+        tensors: list[torch.Tensor] = []
+        is_image = "image" in obs_key
+        for decision in decisions:
+            tensor = self._tensor_from_arraylike(decision[source_key][obs_key])
+            if is_image:
+                if tensor.ndim != 3:
+                    raise ValueError(f"Expected 3D image observation for {obs_key}, got shape {tuple(tensor.shape)}")
+                tensor = tensor.to(torch.float32).permute(2, 0, 1).contiguous() / 255.0
+            tensors.append(tensor)
+        return torch.stack(tensors, dim=0)
 
     def _sample_initial_noise(self, batch_size: int, seed: int, dtype: torch.dtype | None = None) -> torch.Tensor:
         generator = torch.Generator(device=self.device.type if self.device.type != "mps" else "cpu")
@@ -813,6 +874,7 @@ class SimRL100Trainer:
         return {
             "trajectory": trajectory,
             "log_probs_old": log_probs,
+            "global_cond": info["global_cond"].detach().cpu().numpy(),  # type: ignore[index]
         }
 
     def _collect_rollouts(
@@ -823,7 +885,7 @@ class SimRL100Trainer:
         record_decisions: bool,
         mode: str,
     ) -> tuple[RolloutDatasetSpec, dict[str, Any], list[dict[str, Any]]]:
-        rollout_dir = self.rollout_root / f"{phase}_{iteration:03d}"
+        rollout_dir = self._make_rollout_dir(phase=phase, iteration=iteration)
         env = GenesisEnv(
             task=self.cfg.task,
             observation_height=self.cfg.observation_height,
@@ -992,17 +1054,10 @@ class SimRL100Trainer:
         indices = np.arange(len(decision_buffer))
         for local_step in range(steps):
             batch_indices = np.random.choice(indices, size=min(self.cfg.batch_size, len(indices)), replace=False)
-            obs_batch = self._filter_policy_batch(self.preprocessor(
-                {
-                    key: torch.stack(
-                        [torch.as_tensor(decision_buffer[idx]["obs"][key]) for idx in batch_indices], dim=0
-                    )
-                    for key in self.base_dataset.features
-                    if key.startswith("observation.")
-                }
-            ), include_action=False)
-            obs_batch = self._to_device(obs_batch)
-            obs_features = self._encode_obs(obs_batch)
+            obs_features = torch.cat(
+                [self._tensor_from_arraylike(decision_buffer[idx]["global_cond"], device=self.device) for idx in batch_indices],
+                dim=0,
+            )
             returns = torch.as_tensor(
                 [decision_buffer[idx]["return"] for idx in batch_indices],
                 dtype=torch.float32,
@@ -1029,25 +1084,23 @@ class SimRL100Trainer:
             decisions = episode_info["decision_steps"]
             if not decisions:
                 continue
-            obs_batch = self._filter_policy_batch(self.preprocessor(
-                {
-                    key: torch.stack([torch.as_tensor(step["obs"][key]) for step in decisions], dim=0)
-                    for key in self.base_dataset.features
-                    if key.startswith("observation.")
-                }
-            ), include_action=False)
-            next_obs_batch = self._filter_policy_batch(self.preprocessor(
-                {
-                    key: torch.stack([torch.as_tensor(step["next_obs"][key]) for step in decisions], dim=0)
-                    for key in self.base_dataset.features
-                    if key.startswith("observation.")
-                }
-            ), include_action=False)
-            obs_batch = self._to_device(obs_batch)
-            next_obs_batch = self._to_device(next_obs_batch)
+            obs_features = torch.cat(
+                [self._tensor_from_arraylike(decision["global_cond"], device=self.device) for decision in decisions],
+                dim=0,
+            )
+            next_obs_features = torch.cat(
+                [
+                    self._tensor_from_arraylike(
+                        decisions[min(idx + 1, len(decisions) - 1)]["global_cond"],
+                        device=self.device,
+                    )
+                    for idx in range(len(decisions))
+                ],
+                dim=0,
+            )
             with torch.no_grad():
-                values = self.critics.value(self._encode_obs(obs_batch)).squeeze(-1)
-                next_values = self.critics.value(self._encode_obs(next_obs_batch)).squeeze(-1)
+                values = self.critics.value(obs_features).squeeze(-1)
+                next_values = self.critics.value(next_obs_features).squeeze(-1)
             rewards = torch.as_tensor([step["reward"] for step in decisions], dtype=torch.float32, device=self.device)
             dones = torch.as_tensor([float(step["done"]) for step in decisions], dtype=torch.float32, device=self.device)
 
@@ -1084,14 +1137,10 @@ class SimRL100Trainer:
         self.consistency_model.train()
         for local_step in range(steps):
             batch_indices = np.random.choice(indices, size=min(self.cfg.batch_size, len(indices)), replace=False)
-            obs_raw = {
-                key: torch.stack([torch.as_tensor(decision_buffer[idx]["obs"][key]) for idx in batch_indices], dim=0)
-                for key in self.base_dataset.features
-                if key.startswith("observation.")
-            }
-            obs_batch = self._filter_policy_batch(self.preprocessor(obs_raw), include_action=False)
-            obs_batch = self._to_device(obs_batch)
-            global_cond = self._encode_obs(obs_batch)
+            global_cond = torch.cat(
+                [self._tensor_from_arraylike(decision_buffer[idx]["global_cond"], device=self.device) for idx in batch_indices],
+                dim=0,
+            )
             advantages = torch.as_tensor(
                 [decision_buffer[idx]["advantage"] for idx in batch_indices],
                 dtype=torch.float32,
@@ -1099,7 +1148,9 @@ class SimRL100Trainer:
             ).unsqueeze(-1)
             trajectories = [
                 torch.as_tensor(
-                    np.concatenate([decision_buffer[idx]["trajectory"][step_idx] for idx in batch_indices], axis=0),
+                    np.ascontiguousarray(
+                        np.concatenate([decision_buffer[idx]["trajectory"][step_idx] for idx in batch_indices], axis=0)
+                    ),
                     device=self.device,
                     dtype=torch.float32,
                 )
@@ -1107,7 +1158,9 @@ class SimRL100Trainer:
             ]
             old_log_probs = [
                 torch.as_tensor(
-                    np.concatenate([decision_buffer[idx]["log_probs_old"][step_idx] for idx in batch_indices], axis=0),
+                    np.ascontiguousarray(
+                        np.concatenate([decision_buffer[idx]["log_probs_old"][step_idx] for idx in batch_indices], axis=0)
+                    ),
                     device=self.device,
                     dtype=torch.float32,
                 )

@@ -6,6 +6,19 @@ def parse_args():
     parser.add_argument("--dataset-root", type=str, required=True, help="Path to the base LeRobot dataset.")
     parser.add_argument("--task", type=str, default="normal-fix", help="Genesis task name.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory used for checkpoints and rollouts.")
+    parser.add_argument("--init-policy-path", type=str, default=None, help="Checkpoint directory or pretrained_model directory used to initialize the diffusion policy.")
+    parser.add_argument(
+        "--use-separate-rgb-encoder-per-camera",
+        dest="use_separate_rgb_encoder_per_camera",
+        action="store_true",
+        help="Use a separate RGB encoder for each camera view. Enabled by default for RL100 training.",
+    )
+    parser.add_argument(
+        "--shared-rgb-encoder",
+        dest="use_separate_rgb_encoder_per_camera",
+        action="store_false",
+        help="Use a single shared RGB encoder across camera views.",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -71,6 +84,7 @@ def parse_args():
     parser.add_argument("--wandb-project", type=str, default="rl100-lerobot")
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.set_defaults(use_separate_rgb_encoder_per_camera=True)
     return parser.parse_args()
 
 
@@ -78,6 +92,8 @@ def main():
     args = parse_args()
     cfg = make_default_config(dataset_root=args.dataset_root, task=args.task)
     cfg.output_dir = args.output_dir or cfg.output_dir
+    cfg.init_policy_path = args.init_policy_path
+    cfg.use_separate_rgb_encoder_per_camera = args.use_separate_rgb_encoder_per_camera
     cfg.device = args.device
     cfg.seed = args.seed
     cfg.batch_size = args.batch_size
