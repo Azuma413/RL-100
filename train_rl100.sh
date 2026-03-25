@@ -25,15 +25,18 @@ uv run scripts/train_rl100_sim.py \
     --max-episode-steps 500 \
     --use-separate-rgb-encoder-per-camera \
     --device cuda \
+    --batch-size "${BATCH_SIZE:-256}" \
+    --num-workers "${NUM_WORKERS:-8}" \
     --wandb \
     --wandb-project "rl100-lerobot" \
     --wandb-run-name "${WANDB_RUN_NAME}" \
     --rl-policy-learning-rate "${RL_POLICY_LEARNING_RATE:-2e-5}" \
-    --reward-scale "${REWARD_SCALE:-10}" \
+    --reward-scale "${REWARD_SCALE:-1}" \
     --lambda-cd "${LAMBDA_CD:-0}" \
     --cd-every "${CD_EVERY:-5}" \
-    --online-iterations 5 \
-    --online-collection-episodes 20 \
-    --online-value-steps 200 \
-    --online-finetune-steps 1000 \
+    --offline-iterations "${OFFLINE_ITERATIONS:-10}" \
+    --online-iterations "${ONLINE_ITERATIONS:-10}" \
+    --online-collection-episodes "${ONLINE_COLLECTION_EPISODES:-20}" \
+    --online-value-steps "${ONLINE_VALUE_STEPS:-200}" \
+    --online-finetune-steps "${ONLINE_FINETUNE_STEPS:-1000}" \
     --init-policy-path outputs/base/normal-fix/pretrained_model

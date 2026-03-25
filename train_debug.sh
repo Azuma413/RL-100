@@ -28,7 +28,7 @@ uv run scripts/train_rl100_sim.py \
     --il-steps "${IL_STEPS:-1}" \
     --il-retrain-steps "${IL_RETRAIN_STEPS:-1}" \
     --rl-policy-learning-rate "${RL_POLICY_LEARNING_RATE:-2e-5}" \
-    --reward-scale "${REWARD_SCALE:-10}" \
+    --reward-scale "${REWARD_SCALE:-1}" \
     --lambda-cd "${LAMBDA_CD:-0}" \
     --cd-every "${CD_EVERY:-5}" \
     --offline-iterations "${OFFLINE_ITERATIONS:-1}" \

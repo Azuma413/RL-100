@@ -32,20 +32,20 @@ class SimRL100Config:
     task: str = "normal-fix"
     device: str = "cuda"
     seed: int = 42
-    batch_size: int = 16
-    num_workers: int = 2
+    batch_size: int = 256
+    num_workers: int = 8
     learning_rate: float = 1e-4
     rl_policy_learning_rate: float = 2e-5
     critic_learning_rate: float = 3e-4
     weight_decay: float = 1e-6
     il_steps: int = 5_000
     il_retrain_steps: int = 1_000
-    offline_iterations: int = 5
+    offline_iterations: int = 10
     critic_steps: int = 1_000
     offline_collection_episodes: int = 20
     offline_finetune_steps: int = 1_000
     ppo_inner_steps: int = 1
-    online_iterations: int = 0
+    online_iterations: int = 10
     online_collection_episodes: int = 20
     online_finetune_steps: int = 1_000
     online_value_steps: int = 200
@@ -66,7 +66,7 @@ class SimRL100Config:
     gamma: float = 0.92274469442792
     expectile: float = 0.7
     target_update_tau: float = 0.005
-    reward_scale: float = 10.0
+    reward_scale: float = 1.0
     gae_lambda: float = 0.95
     max_grad_norm: float = 1.0
     amp: bool = False
@@ -950,6 +950,35 @@ class SimRL100Trainer:
             return action[ACTION], info
         return action, info
 
+    def _encode_observation_with_current_history(self, numpy_observation: dict[str, Any]) -> torch.Tensor:
+        safe_observation: dict[str, Any] = {}
+        for key, value in numpy_observation.items():
+            if isinstance(value, np.ndarray):
+                safe_observation[key] = np.ascontiguousarray(value)
+            else:
+                safe_observation[key] = value
+
+        observation = prepare_observation_for_inference(
+            safe_observation,
+            self.device,
+            task=self.cfg.task,
+            robot_type=None,
+        )
+        processed = self._to_device(self._filter_policy_batch(self.preprocessor(observation), include_action=False))
+        stacked = self.policy._stack_visual_inputs(processed)
+        temp_queues = {
+            key: type(queue)(queue, maxlen=queue.maxlen)
+            for key, queue in self.policy._queues.items()
+        }
+        temp_queues = populate_queues(temp_queues, stacked)
+        chunk_batch = {
+            key: torch.stack(list(temp_queues[key]), dim=1)
+            for key in temp_queues
+            if key != ACTION
+        }
+        with torch.inference_mode():
+            return self.policy.encode_global_conditioning(chunk_batch)
+
     @staticmethod
     def _to_numpy_trajectory(info: dict[str, torch.Tensor | list[torch.Tensor]]) -> dict[str, Any]:
         trajectory = [step.detach().cpu().numpy() for step in info["trajectory"]]  # type: ignore[index]
@@ -1000,6 +1029,9 @@ class SimRL100Trainer:
             while not done:
                 if current_decision is not None and len(self.policy._queues[ACTION]) == 0:
                     current_decision["next_obs"] = dict(numpy_observation)
+                    current_decision["next_global_cond"] = (
+                        self._encode_observation_with_current_history(numpy_observation).detach().cpu().numpy()
+                    )
                     decision_steps.append(current_decision)
                     current_decision = None
                     decision_env_step = 0
@@ -1043,6 +1075,9 @@ class SimRL100Trainer:
 
             if current_decision is not None and record_decisions:
                 current_decision["next_obs"] = dict(numpy_observation)
+                current_decision["next_global_cond"] = (
+                    self._encode_observation_with_current_history(numpy_observation).detach().cpu().numpy()
+                )
                 decision_steps.append(current_decision)
 
             for frame in frames:
@@ -1173,11 +1208,9 @@ class SimRL100Trainer:
             )
             next_obs_features = torch.cat(
                 [
-                    self._tensor_from_arraylike(
-                        decisions[min(idx + 1, len(decisions) - 1)]["global_cond"],
-                        device=self.device,
-                    )
+                    self._tensor_from_arraylike(decision["next_global_cond"], device=self.device)
                     for idx in range(len(decisions))
+                    for decision in [decisions[idx]]
                 ],
                 dim=0,
             )
