@@ -73,7 +73,7 @@ class RL100TransitionDataset(Dataset):
 
     def _build_index(self) -> None:
         for ep_idx in range(self.dataset.num_episodes):
-            episode = self.dataset.meta.episodes[ep_idx]
+            episode = self.dataset.meta.get_episode_record(ep_idx)
             ep_start = int(episode["dataset_from_index"])
             ep_end = int(episode["dataset_to_index"])
             self._episode_success[ep_idx] = self._infer_episode_success(ep_idx, ep_start, ep_end)

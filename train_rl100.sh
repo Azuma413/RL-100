@@ -22,11 +22,16 @@ uv run scripts/train_rl100_sim.py \
     --dataset-root "datasets/${DATASET_NAME}" \
     --task "${TASK_NAME}" \
     --output-dir "${OUTPUT_DIR}" \
+    --max-episode-steps 500 \
     --use-separate-rgb-encoder-per-camera \
     --device cuda \
     --wandb \
     --wandb-project "rl100-lerobot" \
     --wandb-run-name "${WANDB_RUN_NAME}" \
+    --rl-policy-learning-rate "${RL_POLICY_LEARNING_RATE:-2e-5}" \
+    --reward-scale "${REWARD_SCALE:-10}" \
+    --lambda-cd "${LAMBDA_CD:-0}" \
+    --cd-every "${CD_EVERY:-5}" \
     --online-iterations 5 \
     --online-collection-episodes 20 \
     --online-value-steps 200 \

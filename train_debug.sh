@@ -16,14 +16,6 @@ export INIT_POLICY_PATH="${INIT_POLICY_PATH:-outputs/base/normal-fix/pretrained_
 
 mkdir -p "${OUTPUT_BASE_DIR}"
 
-echo "dataset_root=datasets/${DATASET_NAME}"
-echo "output_dir=${OUTPUT_DIR}"
-echo "wandb_run_name=${WANDB_RUN_NAME}"
-echo "init_policy_path=${INIT_POLICY_PATH}"
-echo "offline_collection_episodes=${OFFLINE_COLLECTION_EPISODES:-12}"
-echo "online_collection_episodes=${ONLINE_COLLECTION_EPISODES:-12}"
-echo "max_episode_steps=${MAX_EPISODE_STEPS:-4}"
-
 uv run scripts/train_rl100_sim.py \
     --dataset-root "datasets/${DATASET_NAME}" \
     --task "${TASK_NAME}" \
@@ -32,15 +24,19 @@ uv run scripts/train_rl100_sim.py \
     --device "${DEVICE:-cuda}" \
     --batch-size "${BATCH_SIZE:-2}" \
     --num-workers "${NUM_WORKERS:-0}" \
-    --max-episode-steps "${MAX_EPISODE_STEPS:-4}" \
+    --max-episode-steps "${MAX_EPISODE_STEPS:-400}" \
     --il-steps "${IL_STEPS:-1}" \
     --il-retrain-steps "${IL_RETRAIN_STEPS:-1}" \
+    --rl-policy-learning-rate "${RL_POLICY_LEARNING_RATE:-2e-5}" \
+    --reward-scale "${REWARD_SCALE:-10}" \
+    --lambda-cd "${LAMBDA_CD:-0}" \
+    --cd-every "${CD_EVERY:-5}" \
     --offline-iterations "${OFFLINE_ITERATIONS:-1}" \
     --critic-steps "${CRITIC_STEPS:-1}" \
-    --offline-collection-episodes "${OFFLINE_COLLECTION_EPISODES:-12}" \
+    --offline-collection-episodes "${OFFLINE_COLLECTION_EPISODES:-20}" \
     --offline-finetune-steps "${OFFLINE_FINETUNE_STEPS:-1}" \
-    --online-iterations "${ONLINE_ITERATIONS:-1}" \
-    --online-collection-episodes "${ONLINE_COLLECTION_EPISODES:-12}" \
+    --online-iterations "${ONLINE_ITERATIONS:-0}" \
+    --online-collection-episodes "${ONLINE_COLLECTION_EPISODES:-10}" \
     --online-value-steps "${ONLINE_VALUE_STEPS:-1}" \
     --online-finetune-steps "${ONLINE_FINETUNE_STEPS:-1}" \
     --eval-episodes "${EVAL_EPISODES:-1}" \

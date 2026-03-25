@@ -121,9 +121,9 @@ uv run scripts/train_rl100_sim.py \
 - `collect/offline/success_rate`, `collect/online/success_rate`: rollout で成功軌跡をどれだけ集められているか
 - `transition/transition_val_loss`: transition model が feature-space dynamics を学べているか
 - `offline_critic/q_loss`, `offline_critic/v_loss`: critic 学習が壊れていないか
-- `offline_ppo_*/ppo_loss`, `offline_ppo_*/approx_kl`, `offline_ppo_*/clip_frac`: PPO 更新の安定性
-- `offline_ppo_*_ope/ope_accepted`: OPE gate が update を受理したか
-- `offline_ppo_*/cd_loss`, `online_ppo/cd_loss`: consistency distillation の追従状況
+- `offline_ppo/ppo_loss`, `offline_ppo/approx_kl`, `offline_ppo/clip_frac`: PPO 更新の安定性
+- `offline_ppo_ope/ope_accepted`: OPE gate が update を受理したか
+- `offline_ppo/cd_loss`, `online_ppo/cd_loss`: consistency distillation の追従状況
 
 wandb では phase ごとに namespaced に記録されます。例えば:
 
@@ -131,8 +131,8 @@ wandb では phase ごとに namespaced に記録されます。例えば:
 - `collect/offline/success_rate`
 - `transition/transition_val_loss`
 - `offline_critic/q_loss`
-- `offline_ppo_1/ppo_loss`
-- `offline_ppo_1_ope/ope_accepted`
+- `offline_ppo/ppo_loss`
+- `offline_ppo_ope/ope_accepted`
 
 ## Fidelity
 original RL-100 に対して忠実に再現した点:
@@ -140,6 +140,7 @@ original RL-100 に対して忠実に再現した点:
 - teacher actor は multi-step DDIM diffusion policy のまま
 - actor 更新は denoising step ごとの PPO ratio で計算
 - offline RL は `critic -> actor PPO(+CD) -> rollout -> IL retrain` の流れ
+- `rollouts/offline_001` は IL 直後ではなく、1 回目の offline PPO 後の policy で収集される
 - consistency model は teacher policy からの 1-step distillation
 - transition model は raw observation ではなく actor の observation conditioning feature 上で学習
 - transition model は ensemble / elite selection / holdout validation / early stopping / state restore を持つ

@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--rl-policy-learning-rate", type=float, default=2e-5)
     parser.add_argument("--critic-learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--il-steps", type=int, default=5000)
@@ -84,6 +85,7 @@ def parse_args():
     parser.add_argument("--wandb-project", type=str, default="rl100-lerobot")
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--force-initial-il-after-init-policy", action="store_true")
     parser.set_defaults(use_separate_rgb_encoder_per_camera=True)
     return parser.parse_args()
 
@@ -99,6 +101,7 @@ def main():
     cfg.batch_size = args.batch_size
     cfg.num_workers = args.num_workers
     cfg.learning_rate = args.learning_rate
+    cfg.rl_policy_learning_rate = args.rl_policy_learning_rate
     cfg.critic_learning_rate = args.critic_learning_rate
     cfg.weight_decay = args.weight_decay
     cfg.il_steps = args.il_steps
@@ -159,6 +162,7 @@ def main():
     cfg.wandb_project = args.wandb_project
     cfg.wandb_entity = args.wandb_entity
     cfg.wandb_run_name = args.wandb_run_name
+    cfg.skip_initial_il_if_init_policy = not args.force_initial_il_after_init_policy
 
     trainer = SimRL100Trainer(cfg)
     trainer.run()

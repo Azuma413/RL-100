@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.utils import dataset_to_policy_features
@@ -24,6 +24,7 @@ from rl_100.training.rl100_dataset import RL100TransitionDataset, RolloutDataset
 from rl_100.training.rl100_policy import RL100DiffusionConfig, RL100DiffusionPolicy
 from rl_100.training.rl100_transition import TransitionModel
 
+
 @dataclass
 class SimRL100Config:
     dataset_root: str
@@ -34,6 +35,7 @@ class SimRL100Config:
     batch_size: int = 16
     num_workers: int = 2
     learning_rate: float = 1e-4
+    rl_policy_learning_rate: float = 2e-5
     critic_learning_rate: float = 3e-4
     weight_decay: float = 1e-6
     il_steps: int = 5_000
@@ -64,15 +66,15 @@ class SimRL100Config:
     gamma: float = 0.92274469442792
     expectile: float = 0.7
     target_update_tau: float = 0.005
-    reward_scale: float = 1.0
+    reward_scale: float = 10.0
     gae_lambda: float = 0.95
     max_grad_norm: float = 1.0
     amp: bool = False
     hf_cache_root: str = "/tmp/rl100_hf_cache"
     relabel_sparse_reward: bool = True
     assume_expert_success: bool = True
-    lambda_cd: float = 1.0
-    cd_every: int = 1
+    lambda_cd: float = 0.0
+    cd_every: int = 5
     rollout_policy_mode: str = "ddim"
     eval_policy_mode: str = "ddim"
     online_record_policy_mode: str = "ddim"
@@ -91,6 +93,7 @@ class SimRL100Config:
     ope_seed: int = 42
     ope_shuffle_batches: bool = True
     ope_use_common_random_numbers: bool = True
+    offline_advantage_std_min: float = 1e-4
     use_wandb: bool = False
     wandb_project: str = "rl100-lerobot"
     wandb_entity: str | None = None
@@ -98,6 +101,7 @@ class SimRL100Config:
     wandb_tags: tuple[str, ...] = ()
     init_policy_path: str | None = None
     use_separate_rgb_encoder_per_camera: bool = True
+    skip_initial_il_if_init_policy: bool = True
 
 
 class SimRL100Trainer:
@@ -158,6 +162,19 @@ class SimRL100Trainer:
         self.history: list[dict[str, Any]] = []
         self.wandb_run = None
 
+    def _reset_policy_optimizer(self, lr: float) -> None:
+        self.optimizer = torch.optim.AdamW(
+            self.policy.parameters(),
+            lr=lr,
+            weight_decay=self.cfg.weight_decay,
+        )
+
+    def _prepare_policy_optimizer_for_bc(self) -> None:
+        self._reset_policy_optimizer(self.cfg.learning_rate)
+
+    def _prepare_policy_optimizer_for_rl(self) -> None:
+        self._reset_policy_optimizer(self.cfg.rl_policy_learning_rate)
+
     def _make_rollout_dir(self, phase: str, iteration: int) -> Path:
         base_dir = self.rollout_root / f"{phase}_{iteration:03d}"
         if not base_dir.exists():
@@ -200,12 +217,21 @@ class SimRL100Trainer:
 
     @staticmethod
     def _metric_namespace(metrics: dict[str, Any]) -> str:
-        phase = str(metrics.get("phase", "train"))
+        phase = SimRL100Trainer._normalize_phase_name(str(metrics.get("phase", "train")))
         if "eval_episodes" in metrics:
             return f"eval/{phase}"
         if "saved_episodes" in metrics:
             return f"collect/{phase}"
         return phase
+
+    @staticmethod
+    def _normalize_phase_name(phase: str) -> str:
+        parts = phase.split("_")
+        if len(parts) >= 2 and parts[-1].isdigit():
+            parts = parts[:-1]
+        elif len(parts) >= 3 and parts[-2].isdigit():
+            parts = parts[:-2] + parts[-1:]
+        return "_".join(parts)
 
     def _log_metrics(self, metrics: dict[str, Any], *, commit: bool = True) -> None:
         metrics = self._sanitize_metrics(metrics)
@@ -316,7 +342,7 @@ class SimRL100Trainer:
         return self._to_device(processed)
 
     def _make_il_dataloader(self) -> DataLoader:
-        datasets: list[LeRobotDataset] = []
+        datasets: list[torch.utils.data.Dataset] = []
         for spec in self.il_specs:
             if spec.root == self.base_dataset_root:
                 datasets.append(self.base_dataset)
@@ -324,7 +350,19 @@ class SimRL100Trainer:
             episodes = spec.success_episodes if self.cfg.merge_success_only else None
             if self.cfg.merge_success_only and not episodes:
                 continue
-            datasets.append(self._load_il_dataset(spec.root, episodes=episodes))
+            dataset = self._load_il_dataset(spec.root)
+            if episodes is not None:
+                success_episode_set = set(episodes)
+                selected_indices = [
+                    idx
+                    for idx, episode_index in enumerate(dataset.hf_dataset["episode_index"])
+                    if int(episode_index) in success_episode_set
+                ]
+                if not selected_indices:
+                    continue
+                datasets.append(Subset(dataset, selected_indices))
+            else:
+                datasets.append(dataset)
         train_dataset = datasets[0] if len(datasets) == 1 else ConcatDataset(datasets)
         drop_last = len(train_dataset) >= self.cfg.batch_size
         return DataLoader(
@@ -577,6 +615,7 @@ class SimRL100Trainer:
         if steps <= 0:
             return []
         self.policy.train()
+        self._prepare_policy_optimizer_for_bc()
         dataloader = self._make_il_dataloader()
         iterator = iter(dataloader)
         logs: list[dict[str, float]] = []
@@ -709,8 +748,9 @@ class SimRL100Trainer:
             )
             policy_snapshot = copy.deepcopy(self.policy.state_dict())
             consistency_snapshot = copy.deepcopy(self.consistency_model.state_dict())
-            optimizer_snapshot = copy.deepcopy(self.optimizer.state_dict())
             consistency_optimizer_snapshot = copy.deepcopy(self.consistency_optimizer.state_dict())
+        self._prepare_policy_optimizer_for_rl()
+        optimizer_snapshot = copy.deepcopy(self.optimizer.state_dict())
         self._set_obs_encoder_requires_grad(False)
         for local_step in range(steps):
             try:
@@ -726,8 +766,20 @@ class SimRL100Trainer:
             with torch.no_grad():
                 obs_features = self._encode_obs(current)
                 chunk_action = self._normalized_chunk_action(current)
-                advantages = self.critics.compute_advantage(obs_features, chunk_action)
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                raw_advantages = self.critics.compute_advantage(obs_features, chunk_action)
+                raw_adv_mean = float(raw_advantages.mean().item())
+                raw_adv_std = float(raw_advantages.std().item())
+                raw_adv_min = float(raw_advantages.min().item())
+                raw_adv_max = float(raw_advantages.max().item())
+                should_skip_update = (
+                    not np.isfinite(raw_adv_mean)
+                    or not np.isfinite(raw_adv_std)
+                    or raw_adv_std < self.cfg.offline_advantage_std_min
+                )
+                if should_skip_update:
+                    advantages = torch.zeros_like(raw_advantages)
+                else:
+                    advantages = (raw_advantages - raw_advantages.mean()) / (raw_advantages.std() + 1e-8)
                 global_cond = obs_features
                 initial_noise = torch.randn(
                     global_cond.shape[0],
@@ -738,9 +790,25 @@ class SimRL100Trainer:
                 )
                 _, trajectory, old_log_probs = self.policy.sample_trajectory(global_cond, noise=initial_noise)
 
-            last_info: dict[str, float] = {}
+            last_info: dict[str, float] = {
+                "raw_adv_mean": raw_adv_mean,
+                "raw_adv_std": raw_adv_std,
+                "raw_adv_min": raw_adv_min,
+                "raw_adv_max": raw_adv_max,
+                "skipped_update": float(int(should_skip_update)),
+                "post_update_approx_kl": 0.0,
+                "post_update_clip_frac": 0.0,
+                "post_update_mean_ratio": 1.0,
+                "post_update_mean_abs_ratio_dev": 0.0,
+            }
             ppo_loss_value = 0.0
-            for _ in range(self.cfg.ppo_inner_steps):
+            if should_skip_update:
+                ppo_loss, ppo_info = self.policy.compute_ppo_loss(old_log_probs, advantages, trajectory, global_cond)
+                ppo_loss_value = float(ppo_loss.item())
+                last_info.update(ppo_info)
+                last_info["grad_norm"] = 0.0
+                last_info["cd_loss"] = 0.0
+            for _ in range(0 if should_skip_update else self.cfg.ppo_inner_steps):
                 self.optimizer.zero_grad(set_to_none=True)
                 self.consistency_optimizer.zero_grad(set_to_none=True)
                 ppo_loss, ppo_info = self.policy.compute_ppo_loss(old_log_probs, advantages, trajectory, global_cond)
@@ -759,8 +827,19 @@ class SimRL100Trainer:
                 if cd_loss_value > 0.0:
                     torch.nn.utils.clip_grad_norm_(self.consistency_model.parameters(), self.cfg.max_grad_norm)
                     self.consistency_optimizer.step()
+                with torch.no_grad():
+                    _, post_update_info = self.policy.compute_ppo_loss(old_log_probs, advantages, trajectory, global_cond)
                 ppo_loss_value = float(ppo_loss.item())
                 last_info = dict(ppo_info)
+                last_info["raw_adv_mean"] = raw_adv_mean
+                last_info["raw_adv_std"] = raw_adv_std
+                last_info["raw_adv_min"] = raw_adv_min
+                last_info["raw_adv_max"] = raw_adv_max
+                last_info["skipped_update"] = 0.0
+                last_info["post_update_approx_kl"] = float(post_update_info.get("approx_kl", 0.0))
+                last_info["post_update_clip_frac"] = float(post_update_info.get("clip_frac", 0.0))
+                last_info["post_update_mean_ratio"] = float(post_update_info.get("mean_ratio", 1.0))
+                last_info["post_update_mean_abs_ratio_dev"] = float(post_update_info.get("mean_abs_ratio_dev", 0.0))
                 last_info["grad_norm"] = float(grad_norm)
                 last_info["cd_loss"] = cd_loss_value
 
@@ -769,8 +848,8 @@ class SimRL100Trainer:
                     "phase": phase,
                     "step": float(self.step),
                     "ppo_loss": float(ppo_loss_value),
-                    "mean_advantage": float(advantages.mean().item()),
-                    "std_advantage": float(advantages.std().item()),
+                    "mean_advantage": float(advantages.mean().item()) if not should_skip_update else 0.0,
+                    "std_advantage": float(advantages.std().item()) if not should_skip_update else 0.0,
                 }
                 metrics.update(last_info)
                 logs.append(metrics)
@@ -778,7 +857,11 @@ class SimRL100Trainer:
                 print(
                     f"[{phase}] step={self.step} local_step={local_step + 1}/{steps} "
                     f"ppo_loss={ppo_loss_value:.4f} kl={last_info.get('approx_kl', 0.0):.4f} "
+                    f"post_kl={last_info.get('post_update_approx_kl', 0.0):.4f} "
                     f"clip_frac={last_info.get('clip_frac', 0.0):.4f} "
+                    f"post_clip_frac={last_info.get('post_update_clip_frac', 0.0):.4f} "
+                    f"raw_adv_std={raw_adv_std:.6f} "
+                    f"skipped={int(should_skip_update)} "
                     f"cd_loss={last_info.get('cd_loss', 0.0):.4f}"
                 )
             self.step += 1
@@ -828,7 +911,7 @@ class SimRL100Trainer:
         self,
         numpy_observation: dict[str, Any],
         mode: str,
-    ) -> tuple[torch.Tensor, dict[str, Tensor | list[Tensor]] | None]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | list[torch.Tensor]] | None]:
         safe_observation: dict[str, Any] = {}
         for key, value in numpy_observation.items():
             if isinstance(value, np.ndarray):
@@ -868,7 +951,7 @@ class SimRL100Trainer:
         return action, info
 
     @staticmethod
-    def _to_numpy_trajectory(info: dict[str, Tensor | list[Tensor]]) -> dict[str, Any]:
+    def _to_numpy_trajectory(info: dict[str, torch.Tensor | list[torch.Tensor]]) -> dict[str, Any]:
         trajectory = [step.detach().cpu().numpy() for step in info["trajectory"]]  # type: ignore[index]
         log_probs = [step.detach().cpu().numpy() for step in info["log_probs_old"]]  # type: ignore[index]
         return {
@@ -1134,6 +1217,7 @@ class SimRL100Trainer:
             return []
         logs: list[dict[str, float]] = []
         indices = np.arange(len(decision_buffer))
+        self._prepare_policy_optimizer_for_rl()
         self.consistency_model.train()
         for local_step in range(steps):
             batch_indices = np.random.choice(indices, size=min(self.cfg.batch_size, len(indices)), replace=False)
@@ -1235,14 +1319,23 @@ class SimRL100Trainer:
         self._init_wandb()
 
         try:
-            self.history.extend(self._train_bc_steps(self.cfg.il_steps, phase="il"))
-            self.history.append(self._evaluate(self.cfg.eval_episodes, phase="il", iteration=0))
-            self._save_checkpoint("il")
+            skip_initial_il = self.cfg.init_policy_path is not None and self.cfg.skip_initial_il_if_init_policy
+            if skip_initial_il:
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="il", iteration=0))
+                self._save_checkpoint("il")
+            else:
+                self.history.extend(self._train_bc_steps(self.cfg.il_steps, phase="il"))
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="il", iteration=0))
+                self._save_checkpoint("il")
 
             for iteration in range(1, self.cfg.offline_iterations + 1):
                 self.history.extend(self._train_transition_model())
                 self.history.extend(self._train_iql_critics(self.cfg.critic_steps))
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="offline_pre_ppo", iteration=iteration))
                 self.history.extend(self._offline_policy_optimization(self.cfg.offline_finetune_steps, phase=f"offline_ppo_{iteration}"))
+                self.history.append(self._evaluate(self.cfg.eval_episodes, phase="offline_post_ppo", iteration=iteration))
+                # `rollouts/offline_XXX` are generated by the post-offline-PPO policy,
+                # before successful episodes are merged back for IL retraining.
                 rollout_spec, collect_summary, _ = self._collect_rollouts(
                     episodes=self.cfg.offline_collection_episodes,
                     phase="offline",
